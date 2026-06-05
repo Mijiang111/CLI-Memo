@@ -35,6 +35,7 @@ function renderPrompt({ continuity }) {
   const phaseLedger = continuity.phaseLedger || continuity.agentContextBundle?.validation?.phaseLedger || continuity.continuityContract?.phaseLedger || {};
   const checkpointLedger = continuity.checkpointLedger || continuity.agentContextBundle?.validation?.checkpointLedger || continuity.continuityContract?.checkpointLedger || {};
   const decisionLedger = continuity.decisionLedger || continuity.agentContextBundle?.validation?.decisionLedger || continuity.continuityContract?.decisionLedger || {};
+  const temporalProvenance = continuity.temporalProvenance || continuity.agentContextBundle?.validation?.temporalProvenance || continuity.continuityContract?.temporalProvenance || {};
   const stateBoundary = continuity.stateBoundary || continuity.agentContextBundle?.validation?.stateBoundary || continuity.continuityContract?.stateBoundary || {};
   const codeGraph = continuity.codeGraph || continuity.architectureTrace?.codeGraph || continuity.architectureMap?.codeGraph || continuity.agentContextBundle?.architecture?.codeGraph || {};
   const hookIngressAudit = continuity.hookIngressAudit || continuity.agentContextBundle?.validation?.hookIngressAudit || continuity.continuityContract?.hookIngressAudit || {};
@@ -136,6 +137,17 @@ function renderPrompt({ continuity }) {
     `- summary: ${decisionLedger.summary || "No temporal decision ledger is embedded."}`,
     `- next action: ${decisionLedger.nextAction || "Verify decision source refs and validity windows before trusting project rules."}`,
     "",
+    "## Temporal Provenance",
+    "",
+    `- status: ${temporalProvenance.status || "unknown"}`,
+    `- facts: ${temporalProvenance.factCount || 0}`,
+    `- valid/watch/stale/invalid: ${temporalProvenance.validCount || 0}/${temporalProvenance.watchCount || 0}/${temporalProvenance.staleCount || 0}/${temporalProvenance.invalidCount || 0}`,
+    `- contradictions: ${temporalProvenance.contradictionCount || 0}`,
+    `- summary: ${temporalProvenance.summary || "No temporal provenance audit is embedded."}`,
+    `- next action: ${temporalProvenance.nextAction || "Verify fact source refs, source hashes, and validity windows before trusting memory."}`,
+    "Temporal checks:",
+    listLines((temporalProvenance.checks || []).slice(0, 6), (item) => `- [${item.status}] ${item.id || item.label}: ${item.detail || item.label}${item.refs?.length ? `\n   - refs: ${item.refs.slice(0, 3).join(", ")}` : ""}`),
+    "",
     "## Hook Ingress",
     "",
     `- status: ${hookIngressAudit.status || "unknown"}`,
@@ -229,7 +241,7 @@ function renderPrompt({ continuity }) {
     "",
     "## Operating Rule",
     "",
-    "Before the next tool call, read attentionPack, check disclosureGate.packing, freshnessGate, phaseLedger, checkpointLedger, decisionLedger, stateBoundary, codeGraph, runtimeEval, hookIngressAudit, and provenanceLedger, then record a fresh `current` event. After the tool call, record `done`, `failed`, or `blocked` with parentId/runId when it belongs to the same operation. Refresh resume/recovery before handing off again.",
+    "Before the next tool call, read attentionPack, check disclosureGate.packing, freshnessGate, phaseLedger, checkpointLedger, decisionLedger, temporalProvenance, stateBoundary, codeGraph, runtimeEval, hookIngressAudit, and provenanceLedger, then record a fresh `current` event. After the tool call, record `done`, `failed`, or `blocked` with parentId/runId when it belongs to the same operation. Refresh resume/recovery before handing off again.",
     ""
   ]
     .filter((line) => line !== undefined && line !== null)

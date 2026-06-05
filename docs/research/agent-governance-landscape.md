@@ -362,7 +362,7 @@ Scores are relative to Project Agent Terminal's target, not to each project narr
 | Cross-agent capture | Akita, rohit | Medium: terminal/runtime events and CLI wrappers | More hook adapters and backpressure |
 | Durable takeover files | RAVBYTE, Akita | High: `.project-agent/` bundle, manifest, prompt, audit, git freshness warning | Freshness can still get stricter with commit-bound artifact hashes |
 | Source-of-truth separation | Akita, RepoWise | Medium: durable JSON/MD files, no derived DB yet | Define raw/event/wiki/index boundaries |
-| Temporal provenance | Graphiti | Medium-low: provenance refs exist, temporal validity is shallow | Add validity windows and contradiction/staleness |
+| Temporal provenance | Graphiti | Medium: temporal provenance audit records fact source refs, hashes, validity windows, stale sources, and contradictions | Add richer invalidation rules and ontology-aware contradiction detection |
 | Code architecture intelligence | RepoWise, CodeBoarding | Medium: architecture map and development trail | Add real code graph adapter or import path |
 | Prompt safety and budget | Repomix, Gitingest | Medium-low: next-agent prompt exists | Add token budget, secret scan, size limits |
 | Risk before edit | RepoWise | Low-medium: changed files and impact folders | Add risk, tests, owners, co-change partners |
@@ -389,7 +389,7 @@ Scores are relative to Project Agent Terminal's target, not to each project narr
 
 1. Handoff lifecycle states: `open`, `accepted`, `expired`, `cancelled`.
 2. Phase ledger for `agent-run`: parent event, command, artifacts, changed files, result, proof gate.
-3. Source provenance model: every memory/decision/architecture node gets `sourceRefs`, `sourceHash`, `observedAt`, and optional `validFrom` / `validUntil`.
+3. Source provenance model: every memory/decision/architecture node gets `sourceRefs`, `sourceHash`, `observedAt`, and optional `validFrom` / `validUntil`; current Temporal Provenance Audit covers the first version.
 4. Freshness gates: architecture map commit, process trace timestamp, state manifest hash, dirty tree warning.
 5. Prompt packing gate: token estimate, secret scan, max files, max bytes, omitted refs list.
 6. Code graph adapter: start with dependency/import graph, then allow RepoWise/CodeBoarding-style richer imports.
@@ -410,7 +410,7 @@ Scores are relative to Project Agent Terminal's target, not to each project narr
 | Axiom journal queue and top-of-mind note | `.project-agent/agent-context-bundle.json` plus bounded next-agent prompt |
 | RAVBYTE worklog, handoff, freshness validator | process trace, takeover packet, state manifest, git freshness, acceptance audit |
 | Akita hook router, sanitizer, backpressure, source/index split, typed handoff | sanitized hook ingress, 429 backpressure audit, state boundary audit, and handoff state machine |
-| Graphiti temporal fact edges | provenance-backed memory graph with validity windows |
+| Graphiti temporal fact edges | Temporal Provenance Audit over memory, decisions, process cursor, freshness state, validity windows, source hashes, stale sources, and contradictions |
 | RepoWise risk and decision intelligence | pre-edit risk panel and evidence-backed decisions |
 | CodeBoarding LSP call graph and linked diagram | architecture map with file/symbol refs |
 | Repomix/Gitingest prompt packing | token/file/byte-budgeted, secret-filtered resume bundle with omitted refs |

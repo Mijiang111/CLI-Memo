@@ -1,14 +1,16 @@
 # Project Agent Terminal 产品开发日志
 
 日期：2026-06-05  
-最新本地提交：`8432ebc feat: add git freshness audit`  
-当前状态：本地 git 提交链已整理；远端 `origin` 尚未配置，暂不能 push 到 GitHub。
+最新本地提交：`feat: add temporal provenance audit`（以 `git log` 为准）  
+当前状态：Temporal Provenance Audit 已实现、验证并本地提交；远端 `origin` 尚未配置，暂不能 push 到 GitHub。
 
 更新：State Boundary Audit 已落地到 continuity、continuity contract、agent context bundle validation、provenance ledger、attention pack、starter prompts、Handoff UI 和 smoke tests。它把 raw events、durable sources、derived indexes、disclosure outputs 明确分层，避免把 prompt/resume/graph index 误当成唯一真相。
 
 更新：Git Freshness Audit 已接入 freshness gate。系统会读取 git HEAD、branch、dirty tree、untracked files 和 state-file changes，并把结果写入 continuity、bundle、starter prompts、Handoff UI 和 smoke tests。dirty tree 不会直接阻断接管，但会作为 freshness warning，提醒下一位 agent 在声称可复现 handoff 前先 review、commit 或 stash。
 
 更新：本轮产品工作已经从“能恢复上下文”推进到“能解释这个上下文是否可信”。State Boundary 负责区分真相源和披露层；Git Freshness 负责把 handoff snapshot 和当前 repo 快照对齐。这两个能力让 Project Agent Terminal 更接近一个 agent control plane，而不是单纯的 resume 文件生成器。
+
+更新：Temporal Provenance Audit 已从 Graphiti benchmark 转化成产品能力。系统会把 memory graph、decision ledger、process trace、freshness gate 中的重要 fact 统一成 temporal facts，记录 source refs、source hash、observedAt、validFrom、validUntil、stale sources、watch/invalid 状态和 contradictions，并写入 continuity、continuity contract、agent context bundle validation、provenance ledger、attention pack、starter prompts、Handoff UI 和 smoke tests。
 
 ## 一、产品定位
 
@@ -115,6 +117,17 @@ Benchmark 结论已经沉淀在 `docs/research/agent-governance-landscape.md`。
 
 产品价值：handoff 不再只证明 `.project-agent/` 文件存在，还能说明它们和当前 repository snapshot 的关系。dirty tree 会成为接管前必须注意的 warning，而不是被隐藏在终端里。
 
+### 10. Temporal Provenance Audit
+
+根据 Graphiti 的 temporal knowledge graph 思路，新增 Temporal Provenance Audit：
+
+- 将 decision、memory node、memory edge、process cursor、freshness snapshot 统一成 temporal facts。
+- 每条 fact 暴露 `sourceRefs`、`sourceHash`、`observedAt`、`validFrom`、`validUntil`、`changedSources` 和 `invalidatedBy`。
+- 在 continuity contract 中新增 `temporal_provenance` capability 和 source-of-truth 指针。
+- 在 agent context bundle、starter prompt、next-agent prompt、provenance ledger、attention pack、Handoff UI 和 smoke test 中暴露 temporal provenance。
+
+产品价值：接手 agent 不只知道“这个说法来自哪里”，还知道“这个说法什么时候观察到、什么时候仍然有效、是否被后续变更变成 stale/watch/invalid”。这把 handoff 从 evidence-backed 推进到 time-aware。
+
 ## 四、当前验证状态
 
 上一轮完成后已验证：
@@ -122,7 +135,7 @@ Benchmark 结论已经沉淀在 `docs/research/agent-governance-landscape.md`。
 - `node --check` 通过相关 server 文件。
 - `npm run build` 通过，只有 Vite chunk size warning。
 - `PORT=4176 npm test` 通过，输出 `smoke ok`。
-- smoke test 覆盖 bundle endpoint、CLI、prompt 文件、final insights、UI source checks、hook backpressure、prompt packing gate、state boundary audit、git freshness audit。
+- smoke test 覆盖 bundle endpoint、CLI、prompt 文件、final insights、UI source checks、hook backpressure、prompt packing gate、state boundary audit、git freshness audit、temporal provenance audit。
 - `.project-agent` 在 smoke 后没有残留。
 - `4176` 端口没有遗留 listener。
 
@@ -135,6 +148,8 @@ Benchmark 结论已经沉淀在 `docs/research/agent-governance-landscape.md`。
 已完成本地提交链：
 
 ```text
+current HEAD feat: add temporal provenance audit
+caf860a docs: update product development log
 8432ebc feat: add git freshness audit
 2612546 feat: add state boundary audit
 8dc80a6 docs: add product development log
@@ -162,11 +177,11 @@ git push -u origin main
 
 ## 七、下一轮建议
 
-下一项优先产品能力建议是 **Temporal Provenance Audit**：
+本轮已产品化 **Temporal Provenance Audit**。下一项优先产品能力建议是 **Code Graph Adapter / Import Path Intelligence**：
 
-- 从 Graphiti 学习 `valid_at`、`invalid_at`、`expired_at` 的时间事实模型。
-- 为 memory graph、decision ledger、process trace 中的重要 fact 增加 validity window、source hash、observedAt 和 stale/invalid/watch 状态。
-- 在 continuity、bundle validation、provenance ledger、attention pack、starter prompt 和 Handoff UI 中暴露 temporal provenance。
-- 对被后续事件推翻、来源过期、source hash 不匹配的 fact 给出 contradiction/staleness warning。
+- 从 RepoWise 和 CodeBoarding 学习真实 import/call graph adapter。
+- 将当前 code graph 从文件级依赖推进到 symbol/import path 级依赖。
+- 在 pre-edit risk 中加入 owners、tests、co-change partners 和 governing decisions 的组合判断。
+- 让 Handoff UI 能明确回答“改这个文件会影响哪些调用者、哪些测试、哪些产品决策”。
 
-这个方向直接对应 Graphiti 和 RepoWise 的 benchmark gap：Project Agent Terminal 现在已经知道“状态来自哪里”，下一步要知道“这个状态在什么时间范围内仍然成立”。这会把 handoff 从 evidence-backed 进一步推进到 time-aware。
+这个方向对应 RepoWise 和 CodeBoarding 的 benchmark gap：Project Agent Terminal 现在已经能解释 memory/process/governance 的可信度，下一步要更深入解释代码依赖和编辑风险。

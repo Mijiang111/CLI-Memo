@@ -502,6 +502,7 @@ function buildAttentionPack(bundle = {}, options = {}) {
   const phaseLedger = bundle.validation?.phaseLedger || {};
   const checkpointLedger = bundle.validation?.checkpointLedger || {};
   const decisionLedger = bundle.validation?.decisionLedger || {};
+  const temporalProvenance = bundle.validation?.temporalProvenance || {};
   const provenance = bundle.validation?.provenanceLedger || {};
   const hookIngressAudit = bundle.validation?.hookIngressAudit || {};
   const stateBoundary = bundle.validation?.stateBoundary || {};
@@ -613,6 +614,15 @@ function buildAttentionPack(bundle = {}, options = {}) {
       `${decisionLedger.status || "unknown"} decision ledger, ${decisionLedger.validCount || 0}/${decisionLedger.decisionCount || 0} valid decision(s). ${decisionLedger.summary || "No temporal decision ledger is embedded."}`,
       decisionLedger.refs || [".project-agent/state.json", ".project-agent/governance-spec.json", "docs/research/agent-governance-landscape.md"],
       { action: decisionLedger.nextAction || "Review sourceRefs and validity windows before trusting project decisions." }
+    ),
+    attentionItem(
+      "temporal_provenance",
+      "provenance",
+      temporalProvenance.status === "blocked" ? 93 : temporalProvenance.status === "watch" ? 88 : 83,
+      "Temporal Provenance",
+      `${temporalProvenance.status || "unknown"} temporal provenance, ${temporalProvenance.validCount || 0}/${temporalProvenance.factCount || 0} valid fact(s), stale ${temporalProvenance.staleCount || 0}, contradictions ${temporalProvenance.contradictionCount || 0}. ${temporalProvenance.summary || "No temporal provenance audit is embedded."}`,
+      temporalProvenance.refs || [".project-agent/continuity.json#temporalProvenance", ".project-agent/memory-graph.json", ".project-agent/continuity.json#decisionLedger"],
+      { action: temporalProvenance.nextAction || "Check fact validity windows, source hashes, and stale sources before trusting memory." }
     ),
     attentionItem(
       "hook_ingress",
@@ -809,6 +819,7 @@ function buildProvenanceLedger(bundle = {}) {
   const phaseLedger = bundle.validation?.phaseLedger || {};
   const checkpointLedger = bundle.validation?.checkpointLedger || {};
   const decisionLedger = bundle.validation?.decisionLedger || {};
+  const temporalProvenance = bundle.validation?.temporalProvenance || {};
   const hookIngressAudit = bundle.validation?.hookIngressAudit || {};
   const stateBoundary = bundle.validation?.stateBoundary || {};
   const preEditRisk = bundle.validation?.preEditRisk || {};
@@ -903,6 +914,18 @@ function buildProvenanceLedger(bundle = {}) {
       decisionLedger.summary || "No decision ledger summary.",
       decisionLedger.refs || [".project-agent/state.json", ".project-agent/governance-spec.json", "docs/research/agent-governance-landscape.md"],
       { observedAt: decisionLedger.decisions?.[0]?.observedAt || null }
+    ),
+    provenanceClaim(
+      "temporal_provenance",
+      "Temporal Provenance",
+      temporalProvenance.status === "traceable" ? "ok" : temporalProvenance.status ? "warn" : "warn",
+      temporalProvenance.summary || "No temporal provenance audit summary.",
+      temporalProvenance.refs || [".project-agent/continuity.json#temporalProvenance", ".project-agent/memory-graph.json", ".project-agent/continuity.json#decisionLedger"],
+      {
+        observedAt: temporalProvenance.facts?.[0]?.observedAt || null,
+        validFrom: temporalProvenance.facts?.[0]?.validFrom || null,
+        validUntil: temporalProvenance.facts?.[0]?.validUntil || null
+      }
     ),
     provenanceClaim(
       "hook_ingress",
@@ -1122,6 +1145,7 @@ export function buildAgentContextBundle(projectDir, continuity = readContinuity(
       phaseLedger: continuity.phaseLedger || continuity.continuityContract?.phaseLedger || null,
       checkpointLedger: continuity.checkpointLedger || continuity.continuityContract?.checkpointLedger || null,
       decisionLedger: continuity.decisionLedger || continuity.continuityContract?.decisionLedger || null,
+      temporalProvenance: continuity.temporalProvenance || continuity.continuityContract?.temporalProvenance || null,
       stateBoundary: continuity.stateBoundary || continuity.continuityContract?.stateBoundary || null,
       runtimeEval: continuity.runtimeEval || continuity.continuityContract?.runtimeEval || null,
       hookIngressAudit: continuity.hookIngressAudit || continuity.continuityContract?.hookIngressAudit || null,
@@ -1260,6 +1284,12 @@ export function verifyAgentContextBundle(projectDir, bundle = readAgentContextBu
   const decisionLedgerStatus = !decisionLedger || decisionLedger.schemaVersion !== "project-agent.decision-ledger.v1"
     ? "warn"
     : decisionLedger.status === "blocked" || decisionLedger.blockers?.length
+      ? "warn"
+      : "ok";
+  const temporalProvenance = bundle.validation?.temporalProvenance || null;
+  const temporalProvenanceStatus = !temporalProvenance || temporalProvenance.schemaVersion !== "project-agent.temporal-provenance-audit.v1"
+    ? "warn"
+    : temporalProvenance.status === "blocked" || temporalProvenance.blockers?.length
       ? "warn"
       : "ok";
   const stateBoundary = bundle.validation?.stateBoundary || null;
@@ -1445,6 +1475,13 @@ export function verifyAgentContextBundle(projectDir, bundle = readAgentContextBu
       decisionLedgerStatus,
       decisionLedger?.summary || "No temporal decision ledger is embedded.",
       decisionLedger?.refs || [".project-agent/state.json", ".project-agent/governance-spec.json", "docs/research/agent-governance-landscape.md"]
+    ),
+    bundleCheck(
+      "temporal_provenance",
+      "Temporal Provenance",
+      temporalProvenanceStatus,
+      temporalProvenance?.summary || "No temporal provenance audit is embedded.",
+      temporalProvenance?.refs || [".project-agent/continuity.json#temporalProvenance", ".project-agent/memory-graph.json", ".project-agent/continuity.json#decisionLedger"]
     ),
     bundleCheck(
       "state_boundary",

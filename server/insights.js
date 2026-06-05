@@ -2569,6 +2569,234 @@ function buildDecisionLedger({ summary = {}, governance = {}, processTrace = {},
   };
 }
 
+function temporalAuditCheck(id, label, status, detail, refs = []) {
+  return {
+    id,
+    label,
+    status,
+    detail: compact(detail, 260),
+    refs: [...new Set((refs || []).filter(Boolean))].slice(0, 8)
+  };
+}
+
+function temporalFact({ id, label, kind, status = "valid", detail = "", observedAt = null, validFrom = null, validUntil = null, sourceRefs = [], sourceHash = null, changedSources = [], invalidatedBy = [], nextAction = "", architectureTrace = {}, changedFiles = [] }) {
+  const refs = [...new Set((sourceRefs || []).filter(Boolean))].slice(0, 12);
+  const invalidators = decisionItems(invalidatedBy).filter(Boolean).slice(0, 8);
+  const changed = (changedSources?.length ? changedSources : changedSourceRefs(refs, changedFiles)).slice(0, 8);
+  const parsedUntil = Date.parse(validUntil || "");
+  const expired = Number.isFinite(parsedUntil) && parsedUntil < Date.now();
+  const effectiveStatus = invalidators.length || ["invalid", "bad", "blocked"].includes(status)
+    ? "invalid"
+    : expired || ["expired", "stale"].includes(status)
+      ? "stale"
+      : changed.length || ["watch", "warn"].includes(status)
+        ? "watch"
+        : "valid";
+  return {
+    id,
+    label: compact(label || id, 140),
+    kind,
+    status: effectiveStatus,
+    detail: compact(detail || label || id, 360),
+    observedAt,
+    validFrom: validFrom || observedAt || null,
+    validUntil: validUntil || null,
+    sourceRefs: refs,
+    sourceHash: sourceHash || decisionSourceHash(refs, architectureTrace),
+    changedSources: changed,
+    invalidatedBy: invalidators,
+    nextAction: compact(nextAction || (effectiveStatus === "valid" ? "Use this fact after checking source refs." : "Re-check this fact against source refs before relying on it."), 220)
+  };
+}
+
+function buildTemporalProvenanceAudit({ memoryGraph = {}, graphTrace = {}, decisionLedger = {}, processTrace = {}, architectureTrace = {}, freshnessGate = {}, changedFiles = [], stateRefs = [] }) {
+  const observedFallback = processTrace?.current?.at || architectureTrace?.scannedAt || freshnessGate?.validity?.observedAt || null;
+  const decisionFacts = (decisionLedger.decisions || []).slice(0, 18).map((decision) =>
+    temporalFact({
+      id: `decision:${decision.id}`,
+      label: decision.title || decision.id,
+      kind: "decision",
+      status: decision.status,
+      detail: decision.statement || decision.title,
+      observedAt: decision.observedAt || observedFallback,
+      validFrom: decision.validFrom || decision.observedAt || observedFallback,
+      validUntil: decision.validUntil || null,
+      sourceRefs: decision.sourceRefs || [],
+      sourceHash: decision.sourceHash || null,
+      changedSources: decision.changedSources || [],
+      invalidatedBy: decision.invalidatedBy || [],
+      nextAction: decision.nextAction,
+      architectureTrace,
+      changedFiles
+    })
+  );
+  const memoryNodeFacts = (memoryGraph.nodes || []).slice(0, 14).map((node) =>
+    temporalFact({
+      id: `memory:${node.id}`,
+      label: node.label || node.id,
+      kind: `memory_node:${node.kind || "unknown"}`,
+      status: node.status === "pending" ? "watch" : "valid",
+      detail: node.meta || node.label || node.id,
+      observedAt: observedFallback,
+      validFrom: observedFallback,
+      sourceRefs: node.provenance || node.refs || [],
+      architectureTrace,
+      changedFiles
+    })
+  );
+  const memoryEdgeFacts = (memoryGraph.edges || []).slice(0, 10).map((edgeItem) =>
+    temporalFact({
+      id: `memory-edge:${edgeItem.source}:${edgeItem.label}:${edgeItem.target}`,
+      label: `${edgeItem.source} -${edgeItem.label}-> ${edgeItem.target}`,
+      kind: "memory_edge",
+      status: "valid",
+      detail: `${edgeItem.source} ${edgeItem.label} ${edgeItem.target}`,
+      observedAt: observedFallback,
+      validFrom: observedFallback,
+      sourceRefs: edgeItem.provenance || edgeItem.refs || [],
+      architectureTrace,
+      changedFiles
+    })
+  );
+  const processFacts = [processTrace.current, processTrace.previous].filter(Boolean).slice(0, 2).map((event, index) =>
+    temporalFact({
+      id: `process:${event.id || index}`,
+      label: event.title || event.phase || `process-${index}`,
+      kind: "process_event",
+      status: event.status === "failed" || event.status === "blocked" ? "watch" : "valid",
+      detail: event.detail || event.title,
+      observedAt: event.at || observedFallback,
+      validFrom: event.at || observedFallback,
+      sourceRefs: [".project-agent/runtime.json", ".project-agent/process-trace.json", event.id, ...(event.refs || [])],
+      architectureTrace,
+      changedFiles
+    })
+  );
+  const freshnessFact = freshnessGate?.schemaVersion
+    ? temporalFact({
+        id: "freshness:state_snapshot",
+        label: "State Snapshot Freshness",
+        kind: "freshness_gate",
+        status: ["expired", "stale"].includes(freshnessGate.status) ? "stale" : freshnessGate.status === "watch" ? "watch" : "valid",
+        detail: freshnessGate.summary,
+        observedAt: freshnessGate.validity?.observedAt || freshnessGate.observedAt || observedFallback,
+        validFrom: freshnessGate.validity?.validFrom || freshnessGate.validity?.observedAt || observedFallback,
+        validUntil: freshnessGate.validity?.validUntil || null,
+        sourceRefs: freshnessGate.refs || [".project-agent/agent-context-bundle.json", ".project-agent/state-manifest.json"],
+        architectureTrace,
+        changedFiles
+      })
+    : null;
+  const facts = [...decisionFacts, ...memoryNodeFacts, ...memoryEdgeFacts, ...processFacts, freshnessFact]
+    .filter(Boolean)
+    .filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index)
+    .slice(0, 48);
+  const withValidity = facts.filter((fact) => fact.validFrom || fact.validUntil);
+  const withHash = facts.filter((fact) => fact.sourceHash);
+  const sourceBacked = facts.filter((fact) => fact.sourceRefs?.length);
+  const invalidFacts = facts.filter((fact) => fact.status === "invalid");
+  const staleFacts = facts.filter((fact) => fact.status === "stale" || fact.changedSources?.length);
+  const watchFacts = facts.filter((fact) => fact.status === "watch");
+  const contradictionFacts = invalidFacts.filter((fact) => fact.invalidatedBy?.length || fact.changedSources?.length || fact.sourceRefs?.length);
+  const contradictions = contradictionFacts.map((fact) => ({
+    factId: fact.id,
+    label: fact.label,
+    status: fact.status,
+    invalidatedBy: fact.invalidatedBy || [],
+    refs: [...new Set([...(fact.sourceRefs || []), ...(fact.invalidatedBy || [])])].slice(0, 8),
+    nextAction: fact.nextAction
+  }));
+  const freshnessIsStale = ["stale", "expired"].includes(freshnessGate?.status);
+  const checks = [
+    temporalAuditCheck(
+      "source_refs",
+      "Source Refs",
+      facts.length && sourceBacked.length === facts.length ? "ok" : facts.length ? "warn" : "bad",
+      facts.length ? `${sourceBacked.length}/${facts.length} temporal fact(s) cite source refs.` : "No temporal facts are available.",
+      sourceBacked.flatMap((fact) => fact.sourceRefs || [])
+    ),
+    temporalAuditCheck(
+      "validity_windows",
+      "Validity Windows",
+      facts.length && withValidity.length === facts.length ? "ok" : facts.length ? "warn" : "bad",
+      facts.length ? `${withValidity.length}/${facts.length} temporal fact(s) expose validFrom or validUntil.` : "No validity windows are available.",
+      facts.map((fact) => fact.id)
+    ),
+    temporalAuditCheck(
+      "source_hashes",
+      "Source Hashes",
+      facts.length && withHash.length === facts.length ? "ok" : facts.length ? "warn" : "bad",
+      facts.length ? `${withHash.length}/${facts.length} temporal fact(s) carry source hashes.` : "No source hashes are available.",
+      facts.map((fact) => fact.sourceHash).filter(Boolean)
+    ),
+    temporalAuditCheck(
+      "stale_sources",
+      "Stale Sources",
+      staleFacts.length || freshnessIsStale ? "warn" : "ok",
+      staleFacts.length || freshnessIsStale ? `${staleFacts.length} fact(s) have stale/changed sources; freshness=${freshnessGate?.status || "unknown"}.` : "No temporal fact has expired or changed source refs.",
+      staleFacts.flatMap((fact) => [...(fact.sourceRefs || []), ...(fact.changedSources || []).map((item) => item.path)])
+    ),
+    temporalAuditCheck(
+      "contradictions",
+      "Contradictions",
+      contradictions.length ? "bad" : "ok",
+      contradictions.length ? `${contradictions.length} invalidated temporal fact(s) require resolution.` : "No invalidated temporal facts or explicit contradictions are active.",
+      contradictions.flatMap((item) => item.refs || [])
+    )
+  ];
+  const blockers = checks.filter((check) => check.status === "bad").map((check) => check.id);
+  const warnings = checks.filter((check) => check.status === "warn").map((check) => check.id);
+  const status = !facts.length
+    ? "missing"
+    : blockers.length
+      ? "blocked"
+      : warnings.length || watchFacts.length || staleFacts.length
+        ? "watch"
+        : "traceable";
+  return {
+    schemaVersion: "project-agent.temporal-provenance-audit.v1",
+    status,
+    summary:
+      status === "traceable"
+        ? `${facts.length} temporal fact(s) are source-backed, hashed, and inside validity windows.`
+        : status === "watch"
+          ? `Temporal provenance is usable with ${warnings.length + watchFacts.length + staleFacts.length} review signal(s).`
+          : status === "blocked"
+            ? `Temporal provenance has ${blockers.length} blocking contradiction/source check(s).`
+            : "No temporal provenance facts could be built.",
+    factCount: facts.length,
+    validCount: facts.filter((fact) => fact.status === "valid").length,
+    watchCount: watchFacts.length,
+    staleCount: staleFacts.length,
+    invalidCount: invalidFacts.length,
+    contradictionCount: contradictions.length,
+    sourceBackedCount: sourceBacked.length,
+    hashedCount: withHash.length,
+    validityWindowCount: withValidity.length,
+    facts,
+    staleFacts: staleFacts.slice(0, 12),
+    watchFacts: watchFacts.slice(0, 12),
+    invalidFacts: invalidFacts.slice(0, 12),
+    contradictions,
+    checks,
+    warnings,
+    blockers,
+    refs: [
+      ".project-agent/continuity.json#temporalProvenance",
+      ".project-agent/memory-graph.json",
+      ".project-agent/continuity.json#decisionLedger",
+      ".project-agent/process-trace.json",
+      ".project-agent/state-manifest.json",
+      "docs/research/agent-governance-landscape.md",
+      ...(stateRefs || []).slice(0, 4)
+    ],
+    nextAction:
+      status === "traceable"
+        ? "Use fact sourceRefs, sourceHash, and validity windows before trusting remembered project state."
+        : "Review stale, watch, or invalid temporal facts before relying on memory, decisions, or handoff claims."
+  };
+}
+
 function specRequirement(id, statement, status, evidence = [], acceptance = "", notes = "") {
   return {
     id,
@@ -3544,7 +3772,8 @@ function buildContinuityContract({
   checkpointLedger,
   runtimeEval,
   hookIngressAudit,
-  stateBoundary
+  stateBoundary,
+  temporalProvenance
 }) {
   const domains = governance?.domains || [];
   const badDomains = domains.filter((domain) => domain.status === "bad");
@@ -3622,6 +3851,13 @@ function buildContinuityContract({
       decisionLedger?.status === "traceable" ? "ok" : decisionLedger?.status === "missing" || decisionLedger?.status === "blocked" ? "bad" : "warn",
       decisionLedger?.summary || "No temporal decision ledger is available.",
       decisionLedger?.refs || [".project-agent/state.json", ".project-agent/governance-spec.json", "docs/research/agent-governance-landscape.md"]
+    ),
+    contractCapability(
+      "temporal_provenance",
+      "Temporal Provenance",
+      temporalProvenance?.status === "traceable" ? "ok" : temporalProvenance?.status === "missing" || temporalProvenance?.status === "blocked" ? "bad" : "warn",
+      temporalProvenance?.summary || "No temporal provenance audit is available.",
+      temporalProvenance?.refs || [".project-agent/continuity.json#temporalProvenance", ".project-agent/memory-graph.json", ".project-agent/continuity.json#decisionLedger"]
     ),
     contractCapability(
       "hook_ingress",
@@ -3706,6 +3942,7 @@ function buildContinuityContract({
       phaseLedger: ".project-agent/continuity.json#phaseLedger",
       checkpointLedger: ".project-agent/continuity.json#checkpointLedger",
       decisionLedger: ".project-agent/continuity.json#decisionLedger",
+      temporalProvenance: ".project-agent/continuity.json#temporalProvenance",
       stateBoundary: ".project-agent/continuity.json#stateBoundary",
       architectureMap: ".project-agent/architecture-map.json",
       codeGraph: ".project-agent/architecture-map.json#codeGraph",
@@ -3862,6 +4099,20 @@ function buildContinuityContract({
           nextAction: decisionLedger.nextAction
         }
       : null,
+    temporalProvenance: temporalProvenance
+      ? {
+          schemaVersion: temporalProvenance.schemaVersion,
+          status: temporalProvenance.status,
+          summary: temporalProvenance.summary,
+          factCount: temporalProvenance.factCount,
+          validCount: temporalProvenance.validCount,
+          watchCount: temporalProvenance.watchCount,
+          staleCount: temporalProvenance.staleCount,
+          invalidCount: temporalProvenance.invalidCount,
+          contradictionCount: temporalProvenance.contradictionCount,
+          nextAction: temporalProvenance.nextAction
+        }
+      : null,
     hookIngressAudit: hookIngressAudit
       ? {
           schemaVersion: hookIngressAudit.schemaVersion,
@@ -3926,10 +4177,15 @@ function buildContinuityContract({
         id: "state_boundary",
         statement: "Treat raw events and durable sources as authority; treat indexes and prompts as derived/disclosure.",
         refs: [".project-agent/continuity.json#stateBoundary", ".project-agent/runtime.json", ".project-agent/state.json"]
+      },
+      {
+        id: "temporal_provenance",
+        statement: "Verify temporal facts against source refs, hashes, and validity windows before trusting memory or decisions.",
+        refs: [".project-agent/continuity.json#temporalProvenance", ".project-agent/memory-graph.json", ".project-agent/continuity.json#decisionLedger"]
       }
     ],
     handoffRules: governance?.operatingContract || [],
-    stateRefs: [...new Set([".project-agent/agent-context-bundle.json", ".project-agent/governance-spec.json", ".project-agent/continuity-contract.json", ".project-agent/agent-runbook.json", ".project-agent/memory-graph.json", ".project-agent/process-trace.json", ".project-agent/architecture-map.json", ".project-agent/state-manifest.json", ".project-agent/takeover-packet.json", ".project-agent/continuity-audit.json", ".project-agent/next-agent-prompt.md", ".project-agent/continuity.json#stateBoundary", ...(stateRefs || [])])]
+    stateRefs: [...new Set([".project-agent/agent-context-bundle.json", ".project-agent/governance-spec.json", ".project-agent/continuity-contract.json", ".project-agent/agent-runbook.json", ".project-agent/memory-graph.json", ".project-agent/process-trace.json", ".project-agent/architecture-map.json", ".project-agent/state-manifest.json", ".project-agent/takeover-packet.json", ".project-agent/continuity-audit.json", ".project-agent/next-agent-prompt.md", ".project-agent/continuity.json#temporalProvenance", ".project-agent/continuity.json#stateBoundary", ...(stateRefs || [])])]
   };
 }
 
@@ -4061,6 +4317,7 @@ function buildContinuity({ projectDir = "", summary, packet, currentStep, proces
     ".project-agent/takeover-acceptance-audit.json",
     ".project-agent/next-agent-prompt.md",
     ".project-agent/continuity.json",
+    ".project-agent/continuity.json#temporalProvenance",
     ".project-agent/continuity.json#stateBoundary",
     ".project-agent/resume.md",
     ".project-agent/recovery.md",
@@ -4126,6 +4383,16 @@ function buildContinuity({ projectDir = "", summary, packet, currentStep, proces
     stateRefs
   });
   const decisionLedger = buildDecisionLedger({ summary, governance, processTrace, architectureTrace, changedFiles, stateRefs });
+  const temporalProvenance = buildTemporalProvenanceAudit({
+    memoryGraph,
+    graphTrace,
+    decisionLedger,
+    processTrace,
+    architectureTrace,
+    freshnessGate,
+    changedFiles,
+    stateRefs
+  });
   const stateBoundary = buildStateBoundary({
     stateRefs,
     processTrace,
@@ -4162,7 +4429,8 @@ function buildContinuity({ projectDir = "", summary, packet, currentStep, proces
     checkpointLedger,
     runtimeEval,
     hookIngressAudit,
-    stateBoundary
+    stateBoundary,
+    temporalProvenance
   });
   const governanceSpec = buildGovernanceSpec({
     goal,
@@ -4217,6 +4485,7 @@ function buildContinuity({ projectDir = "", summary, packet, currentStep, proces
     phaseLedger,
     checkpointLedger,
     decisionLedger,
+    temporalProvenance,
     stateBoundary,
     runtimeEval,
     hookIngressAudit,
@@ -4248,6 +4517,7 @@ function buildContinuity({ projectDir = "", summary, packet, currentStep, proces
       "Inspect phaseLedger before replaying tool work; linked means parent/child spans and run groups are available, flat means record parentId/runId first.",
       "Inspect checkpointLedger before resuming or retrying work; it lists resumable checkpoints, pending writes, failed gates, and artifact refs.",
       "Inspect decisionLedger before trusting project rules or product strategy; watch/invalid decisions must be rechecked against source refs.",
+      "Inspect temporalProvenance before trusting memory or decisions; it lists fact validity windows, source hashes, stale sources, and contradictions.",
       "Inspect stateBoundary before trusting generated indexes or prompts; raw events and durable sources outrank derived/disclosure artifacts.",
       "Inspect runtimeEval before claiming completion; it scores spans, phase coverage, provenance, evidence, and active errors.",
       "Inspect hookIngressAudit before trusting external hook events; it records sanitized ingress, type normalization, and redactions.",

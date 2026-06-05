@@ -34,6 +34,7 @@ export function renderAgentContextPrompt(bundle, verification = verifyAgentConte
   const phaseLedger = bundle?.validation?.phaseLedger || {};
   const checkpointLedger = bundle?.validation?.checkpointLedger || {};
   const decisionLedger = bundle?.validation?.decisionLedger || {};
+  const temporalProvenance = bundle?.validation?.temporalProvenance || {};
   const stateBoundary = bundle?.validation?.stateBoundary || {};
   const codeGraph = bundle?.architecture?.codeGraph || bundle?.architecture?.map?.codeGraph || bundle?.architecture?.trace?.codeGraph || {};
   const hookIngressAudit = bundle?.validation?.hookIngressAudit || {};
@@ -114,6 +115,17 @@ export function renderAgentContextPrompt(bundle, verification = verifyAgentConte
     `- changed sources: ${decisionLedger.changedSourceCount || 0}`,
     `- summary: ${decisionLedger.summary || "No temporal decision ledger is embedded."}`,
     `- next action: ${decisionLedger.nextAction || "Verify decision source refs and validity windows before trusting project rules."}`,
+    "",
+    "## Temporal Provenance",
+    "",
+    `- status: ${temporalProvenance.status || "unknown"}`,
+    `- facts: ${temporalProvenance.factCount || 0}`,
+    `- valid/watch/stale/invalid: ${temporalProvenance.validCount || 0}/${temporalProvenance.watchCount || 0}/${temporalProvenance.staleCount || 0}/${temporalProvenance.invalidCount || 0}`,
+    `- contradictions: ${temporalProvenance.contradictionCount || 0}`,
+    `- summary: ${temporalProvenance.summary || "No temporal provenance audit is embedded."}`,
+    `- next action: ${temporalProvenance.nextAction || "Verify fact source refs, source hashes, and validity windows before trusting memory."}`,
+    "Temporal checks:",
+    listLines((temporalProvenance.checks || []).slice(0, 6), (item) => `- [${item.status}] ${item.id || item.label}: ${item.detail || item.label}${item.refs?.length ? ` refs=${item.refs.slice(0, 3).join(", ")}` : ""}`),
     "",
     "## Hook Ingress",
     "",

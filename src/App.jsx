@@ -194,6 +194,13 @@ function decisionTone(status) {
   return "muted";
 }
 
+function temporalTone(status) {
+  if (["traceable", "valid", "ok"].includes(status)) return "ok";
+  if (["watch", "stale", "warn"].includes(status)) return "warn";
+  if (["blocked", "invalid", "missing", "bad"].includes(status)) return "bad";
+  return "muted";
+}
+
 function codeGraphTone(status) {
   if (["linked", "external", "ok"].includes(status)) return "ok";
   if (["flat", "watch", "warn"].includes(status)) return "warn";
@@ -2590,6 +2597,7 @@ function ContinuityPanel({ continuity }) {
   const provenanceLedger = contextBundle?.validation?.provenanceLedger;
   const stateBoundary = continuity.stateBoundary || contextBundle?.validation?.stateBoundary || continuity.continuityContract?.stateBoundary;
   const decisionLedger = continuity.decisionLedger || contextBundle?.validation?.decisionLedger || continuity.continuityContract?.decisionLedger;
+  const temporalProvenance = continuity.temporalProvenance || contextBundle?.validation?.temporalProvenance || continuity.continuityContract?.temporalProvenance;
   const codeGraph = continuity.codeGraph || contextBundle?.architecture?.codeGraph || continuity.architectureMap?.codeGraph || continuity.architectureTrace?.codeGraph;
   const attentionPack = contextBundle?.validation?.attentionPack;
   const freshnessGate = continuity.freshnessGate || contextBundle?.validation?.freshnessGate || continuity.continuityContract?.freshnessGate;
@@ -2665,6 +2673,7 @@ function ContinuityPanel({ continuity }) {
               ["provenance", provenanceLedger ? `${provenanceLedger.status} ${provenanceLedger.coverage?.hashedCoverage || ""}` : "provenance ledger"],
               ["boundary", stateBoundary ? `${stateBoundary.status} ${stateBoundary.totals?.derivedIndexes || 0} indexes` : "state boundary"],
               ["decisions", decisionLedger ? `${decisionLedger.status} ${decisionLedger.validCount || 0}/${decisionLedger.decisionCount || 0}` : "decision ledger"],
+              ["temporal", temporalProvenance ? `${temporalProvenance.status} ${temporalProvenance.validCount || 0}/${temporalProvenance.factCount || 0}` : "temporal provenance"],
               ["freshness", freshnessGate ? `${freshnessGate.status} ${freshnessGate.validity?.validUntil || ""}` : "freshness gate"],
               ["ledger", phaseLedger ? `${phaseLedger.status} ${phaseLedger.linkedCount || 0}/${phaseLedger.spanCount || 0}` : "phase ledger"],
               ["checkpoint", checkpointLedger ? `${checkpointLedger.status} ${checkpointLedger.resumableCount || 0}/${checkpointLedger.checkpointCount || 0}` : "checkpoint ledger"],
@@ -2690,6 +2699,7 @@ function ContinuityPanel({ continuity }) {
       <StateBoundaryPanel boundary={stateBoundary} />
       <ProvenanceLedgerPanel ledger={provenanceLedger} />
       <DecisionLedgerPanel ledger={decisionLedger} />
+      <TemporalProvenancePanel audit={temporalProvenance} />
       <CodeGraphPanel graph={codeGraph} />
       <FreshnessGatePanel gate={freshnessGate} />
       <PhaseLedgerPanel ledger={phaseLedger} />
@@ -2946,6 +2956,52 @@ function ContinuityPanel({ continuity }) {
   );
 }
 
+function TemporalProvenancePanel({ audit }) {
+  if (!audit) return null;
+  const tone = temporalTone(audit.status);
+  const checks = audit.checks || [];
+  const facts = audit.staleFacts?.length || audit.invalidFacts?.length || audit.watchFacts?.length
+    ? [...(audit.invalidFacts || []), ...(audit.staleFacts || []), ...(audit.watchFacts || [])]
+    : audit.facts || [];
+  return (
+    <section className="insight-section temporal-provenance" data-temporal-provenance=".project-agent/continuity.json#temporalProvenance">
+      <div className="insight-heading">
+        <span>Temporal Provenance</span>
+        <Pill tone={tone}>{audit.status || "unknown"}</Pill>
+      </div>
+      <p>{audit.summary || "No temporal provenance audit available."}</p>
+      <div className="audit-counts">
+        <span className={tone}>facts {audit.factCount || 0}</span>
+        <span className="ok">valid {audit.validCount || 0}</span>
+        <span className={audit.staleCount ? "warn" : "ok"}>stale {audit.staleCount || 0}</span>
+        <span className={audit.contradictionCount ? "bad" : "ok"}>contradictions {audit.contradictionCount || 0}</span>
+      </div>
+      <div className="temporal-provenance-checks">
+        {checks.slice(0, 6).map((check) => (
+          <span key={check.id} className={check.status} title={check.detail}>
+            {check.status} {check.label}
+          </span>
+        ))}
+      </div>
+      {facts.length ? (
+        <div className="temporal-fact-grid">
+          {facts.slice(0, 6).map((fact) => (
+            <div key={fact.id} className={`temporal-fact-card ${temporalTone(fact.status)}`}>
+              <span>{fact.status}</span>
+              <strong title={fact.detail || fact.label}>{fact.label}</strong>
+              <small title={(fact.sourceRefs || []).join(", ")}>{fact.validUntil || fact.validFrom || fact.sourceRefs?.[0] || "no validity window"}</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="acceptance-source">
+        <span>next</span>
+        <code>{audit.nextAction || "Verify temporal facts before trusting memory or decisions."}</code>
+      </div>
+    </section>
+  );
+}
+
 function GoalSeedPanel({ state, activeGoalId, setActiveGoalId, onCreateGoal }) {
   const [objective, setObjective] = useState("");
   const [acceptance, setAcceptance] = useState("Working memory graph exists\nCode flow reflects current evidence\nAudit can verify completion");
@@ -3054,6 +3110,7 @@ function RunContextSidecar({
   const provenanceLedger = contextBundle?.validation?.provenanceLedger || null;
   const stateBoundary = continuity?.stateBoundary || contextBundle?.validation?.stateBoundary || continuity?.continuityContract?.stateBoundary || null;
   const decisionLedger = continuity?.decisionLedger || contextBundle?.validation?.decisionLedger || continuity?.continuityContract?.decisionLedger || null;
+  const temporalProvenance = continuity?.temporalProvenance || contextBundle?.validation?.temporalProvenance || continuity?.continuityContract?.temporalProvenance || null;
   const attentionPack = contextBundle?.validation?.attentionPack || null;
   const freshnessGate = continuity?.freshnessGate || contextBundle?.validation?.freshnessGate || continuity?.continuityContract?.freshnessGate || null;
   const phaseLedger = continuity?.phaseLedger || contextBundle?.validation?.phaseLedger || continuity?.continuityContract?.phaseLedger || null;
@@ -3174,6 +3231,13 @@ function RunContextSidecar({
           onClick={openHandoff}
         />
         <SidecarLine
+          title="Temporal"
+          value={temporalProvenance?.factCount ? `${temporalProvenance.status} ${temporalProvenance.validCount || 0}/${temporalProvenance.factCount}` : "Temporal provenance"}
+          meta={temporalProvenance?.nextAction || temporalProvenance?.summary || "Fact validity windows"}
+          tone={temporalProvenance ? temporalTone(temporalProvenance.status) : "warn"}
+          onClick={openHandoff}
+        />
+        <SidecarLine
           title="Boundary"
           value={stateBoundary?.status ? `${stateBoundary.status} state` : "State boundary"}
           meta={stateBoundary?.nextAction || stateBoundary?.summary || "Source/index/disclosure split"}
@@ -3279,6 +3343,7 @@ function RunContextSidecar({
           <StateBoundaryPanel boundary={stateBoundary} />
           <ProvenanceLedgerPanel ledger={provenanceLedger} />
           <DecisionLedgerPanel ledger={decisionLedger} />
+          <TemporalProvenancePanel audit={temporalProvenance} />
           <CodeGraphPanel graph={codeGraph} />
           <FreshnessGatePanel gate={freshnessGate} />
           <PhaseLedgerPanel ledger={phaseLedger} />
