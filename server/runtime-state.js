@@ -4,6 +4,7 @@ import path from "node:path";
 
 const RUNTIME_FILE = "runtime.json";
 const CONTINUITY_FILE = "continuity.json";
+const CONTINUITY_DETAIL_FILE = "continuity-detail.json";
 const CONTRACT_FILE = "continuity-contract.json";
 const AGENT_RUNBOOK_FILE = "agent-runbook.json";
 const MEMORY_GRAPH_FILE = "memory-graph.json";
@@ -79,6 +80,8 @@ const SECRET_KEY_RE = /password|passwd|pwd|api[_-]?key|secret|token|auth[_-]?tok
 const ATTENTION_PACK_TOKEN_BUDGET = 1800;
 const TAKEOVER_SUMMARY_TOKEN_BUDGET = 1800;
 const TAKEOVER_SUMMARY_BYTE_BUDGET = 14000;
+const CONTINUITY_MANIFEST_TOKEN_BUDGET = 12000;
+const CONTINUITY_MANIFEST_BYTE_BUDGET = 60000;
 const SECTION_BUDGETS = {
   memory: { maxTokens: 1800, maxBytes: 18000, sourceRef: ".project-agent/memory-graph.json", jq: "{nodeCount,edgeCount,provenanceCoverage,nodes:.nodes[0:12],edges:.edges[0:16],provenanceRefs:.provenanceRefs[0:12]}" },
   process: { maxTokens: 1800, maxBytes: 18000, sourceRef: ".project-agent/process-trace.json", jq: "{current,previous,next,phases:.phases[0:8],recentEvents:.events[0:8],inspectOrder:.inspectOrder[0:12]}" },
@@ -111,6 +114,10 @@ function runtimePath(projectDir) {
 
 function continuityPath(projectDir) {
   return path.join(stateDir(projectDir), CONTINUITY_FILE);
+}
+
+function continuityDetailPath(projectDir) {
+  return path.join(stateDir(projectDir), CONTINUITY_DETAIL_FILE);
 }
 
 function contractPath(projectDir) {
@@ -181,6 +188,7 @@ const MANIFEST_FILES = [
   "codex-takeover-smoke.json",
   "next-agent-prompt.md",
   CONTINUITY_FILE,
+  CONTINUITY_DETAIL_FILE,
   "resume.md",
   "recovery.md",
   "state.json",
@@ -188,11 +196,62 @@ const MANIFEST_FILES = [
 ];
 const VOLATILE_MANIFEST_PATHS = new Set([
   `.project-agent/${RUNTIME_FILE}`,
+  `.project-agent/${CONTINUITY_FILE}`,
+  `.project-agent/${CONTINUITY_DETAIL_FILE}`,
   `.project-agent/${STATE_MANIFEST_FILE}`,
   `.project-agent/${AGENT_CONTEXT_BUNDLE_FILE}`,
   `.project-agent/${TAKEOVER_SUMMARY_FILE}`,
   `.project-agent/${TAKEOVER_ACCEPTANCE_AUDIT_FILE}`,
   ".project-agent/codex-takeover-smoke.json"
+]);
+const CONTINUITY_DETAIL_FIELDS = [
+  "currentStep",
+  "kernelSummary",
+  "workstreams",
+  "processCursor",
+  "previousEvent",
+  "nextEvent",
+  "recentEvents",
+  "openTargets",
+  "changedFiles",
+  "architectureImpact",
+  "graphTrace",
+  "architectureTrace",
+  "codeGraph",
+  "preEditRisk",
+  "handoffLifecycle",
+  "freshnessGate",
+  "phaseLedger",
+  "checkpointLedger",
+  "decisionLedger",
+  "temporalProvenance",
+  "stateBoundary",
+  "runtimeEval",
+  "hookIngressAudit",
+  "interruptedWork",
+  "agentLeases",
+  "handoffSnapshot",
+  "architectureTotals",
+  "handoffId",
+  "takeoverReadiness",
+  "governance",
+  "objectiveCoverage",
+  "startProtocol",
+  "nextAgentInstructions"
+];
+const CONTINUITY_DETAIL_SUMMARY_FIELDS = new Set([
+  "preEditRisk",
+  "freshnessGate",
+  "phaseLedger",
+  "checkpointLedger",
+  "decisionLedger",
+  "temporalProvenance",
+  "stateBoundary",
+  "runtimeEval",
+  "hookIngressAudit",
+  "takeoverReadiness",
+  "objectiveCoverage",
+  "startProtocol"
 ]);
 
 function sha256(value) {
@@ -1328,6 +1387,345 @@ function takeoverPacketSummary(packet = {}, budget = null) {
   };
 }
 
+function stateRef(fileName) {
+  return `.project-agent/${fileName}`;
+}
+
+function stateFileRecord(projectDir, fileName, reason, jq = null) {
+  const ref = stateRef(fileName);
+  const file = path.join(stateDir(projectDir), fileName);
+  const record = { path: ref, reason, jq, exists: existsSync(file) };
+  if (!record.exists) return record;
+  const content = readFileSync(file);
+  const stat = statSync(file);
+  return {
+    ...record,
+    bytes: stat.size,
+    sha256: sha256(content),
+    schemaVersion: fileName.endsWith(".json") ? jsonSchemaVersion(content.toString("utf8")) : null,
+    volatile: VOLATILE_MANIFEST_PATHS.has(ref)
+  };
+}
+
+function primitiveFieldSnapshot(value = {}) {
+  if (!value || typeof value !== "object") return {};
+  const snapshot = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (Object.keys(snapshot).length >= 8) break;
+    if (entry === null || ["string", "number", "boolean"].includes(typeof entry)) {
+      snapshot[key] = typeof entry === "string" ? compact(entry, 160) : entry;
+    } else if (Array.isArray(entry)) {
+      snapshot[`${key}Count`] = entry.length;
+    } else if (entry && typeof entry === "object") {
+      if (entry.status || entry.summary) {
+        snapshot[`${key}Status`] = entry.status || null;
+        if (entry.summary) snapshot[`${key}Summary`] = compact(entry.summary, 180);
+      }
+    }
+  }
+  return snapshot;
+}
+
+function objectSummary(value, sourceRef, label = "field") {
+  if (!value) {
+    return {
+      schemaVersion: "project-agent.continuity-field-summary.v1",
+      label,
+      status: "missing",
+      sourceRef
+    };
+  }
+  const text = jsonText(value);
+  return {
+    schemaVersion: "project-agent.continuity-field-summary.v1",
+    label,
+    status: value.status || value.state || (value.canResume === false ? "blocked" : "available"),
+    summary: compact(value.summary || value.purpose || value.objective || value.title || `${label} available.`, 320),
+    sourceRef,
+    contentHash: sha256(text),
+    bytes: Buffer.byteLength(text, "utf8"),
+    estimatedTokens: estimateDisclosureTokens(text),
+    fields: primitiveFieldSnapshot(value)
+  };
+}
+
+function fileChangeSummary(file = {}) {
+  return {
+    path: file.path,
+    status: file.status,
+    kind: file.kind,
+    modifiedAt: file.modifiedAt,
+    additions: file.additions || 0,
+    deletions: file.deletions || 0,
+    summary: compact(file.summary || "", 220),
+    hash: file.hash || file.previousHash || null
+  };
+}
+
+function startProtocolSummary(protocol = {}) {
+  if (!protocol) return null;
+  return {
+    schemaVersion: "project-agent.start-protocol-summary.v1",
+    status: protocol.status || "available",
+    activeStepId: protocol.activeStepId || null,
+    nextCommand: protocol.nextCommand || null,
+    readFirst: (protocol.readFirst || []).slice(0, 8).map((item) => ({
+      path: item.path,
+      why: compact(item.why || "", 140)
+    })),
+    firstActions: (protocol.firstActions || []).slice(0, 6).map((action) => ({
+      id: action.id,
+      action: compact(action.action || action.label || action.title || "", 180),
+      command: action.command,
+      refs: (action.refs || []).slice?.(0, 6) || []
+    })),
+    proofGates: (protocol.proofGates || protocol.gates || []).slice(0, 6),
+    sourceRef: `${stateRef(CONTINUITY_DETAIL_FILE)}#startProtocol`
+  };
+}
+
+function continuityBudget(value) {
+  const text = jsonText(value);
+  const bytes = Buffer.byteLength(text, "utf8");
+  const estimatedTokens = estimateDisclosureTokens(text);
+  return {
+    schemaVersion: "project-agent.continuity-budget.v1",
+    status: bytes > CONTINUITY_MANIFEST_BYTE_BUDGET || estimatedTokens > CONTINUITY_MANIFEST_TOKEN_BUDGET ? "over_budget" : "ok",
+    maxBytes: CONTINUITY_MANIFEST_BYTE_BUDGET,
+    maxTokens: CONTINUITY_MANIFEST_TOKEN_BUDGET,
+    bytes,
+    estimatedTokens
+  };
+}
+
+function buildContinuityDetail(packet = {}) {
+  const bundleValidation = packet.agentContextBundle?.validation || {};
+  const detail = {
+    schemaVersion: "project-agent.continuity-detail.v1",
+    generatedAt: packet.generatedAt || nowIso(),
+    project: packet.project || null,
+    purpose: "On-demand continuity details. Do not use as the default takeover packet.",
+    defaultRead: stateRef(TAKEOVER_SUMMARY_FILE),
+    fields: []
+  };
+  for (const field of CONTINUITY_DETAIL_FIELDS) {
+    const value = packet[field] !== undefined ? packet[field] : bundleValidation[field];
+    if (value !== undefined) {
+      detail[field] = value;
+      detail.fields.push(field);
+    }
+  }
+  return detail;
+}
+
+function writeContinuityDetail(projectDir, detail) {
+  mkdirSync(stateDir(projectDir), { recursive: true });
+  writeFileSync(continuityDetailPath(projectDir), `${JSON.stringify(detail, null, 2)}\n`, "utf8");
+  return detail;
+}
+
+function shouldHydrateFromDetail(value) {
+  if (value === undefined || value === null) return true;
+  const schema = String(value.schemaVersion || "");
+  return schema.includes("-summary") || schema === "project-agent.continuity-field-summary.v1";
+}
+
+function hydrateContinuityFromDetail(projectDir, continuity = {}, options = {}) {
+  const detail = options.continuityDetail || readContinuityDetail(projectDir);
+  if (!detail?.schemaVersion) return continuity || {};
+  const hydrated = { ...(continuity || {}) };
+  for (const field of CONTINUITY_DETAIL_FIELDS) {
+    if (detail[field] !== undefined && shouldHydrateFromDetail(hydrated[field])) hydrated[field] = detail[field];
+  }
+  return hydrated;
+}
+
+function hasRichValidationDetail(key, value) {
+  if (!value) return false;
+  const schema = String(value.schemaVersion || "");
+  if (schema.includes("-summary") || schema === "project-agent.continuity-field-summary.v1") return false;
+  if (key === "temporalProvenance") return Array.isArray(value.checks) || Array.isArray(value.facts);
+  if (key === "decisionLedger") return Array.isArray(value.decisions) || Array.isArray(value.checks);
+  if (key === "phaseLedger") return Array.isArray(value.spans) || Array.isArray(value.runs) || Array.isArray(value.checks) || Number.isFinite(Number(value.spanCount));
+  if (key === "checkpointLedger") return Array.isArray(value.checkpoints) || Array.isArray(value.checks) || Number.isFinite(Number(value.checkpointCount));
+  if (key === "stateBoundary") return Array.isArray(value.layers) || Array.isArray(value.checks) || value.totals;
+  if (key === "runtimeEval") return Array.isArray(value.checks) || value.score || value.trace;
+  if (key === "hookIngressAudit") return Array.isArray(value.checks) || value.backpressure || Number.isFinite(Number(value.acceptedEvents));
+  if (key === "objectiveCoverage") return Array.isArray(value.requirements) || Array.isArray(value.acceptance);
+  return true;
+}
+
+function selectValidationField(key, ...candidates) {
+  return candidates.find((value) => hasRichValidationDetail(key, value)) || candidates.find(Boolean) || null;
+}
+
+function buildContinuitySourceRefs(projectDir) {
+  return [
+    stateFileRecord(projectDir, TAKEOVER_SUMMARY_FILE, "default cold-start takeover packet", "{activeGoal,currentState,nextStep,takeover,risks,budgets,onDemandReads}"),
+    stateFileRecord(projectDir, AGENT_CONTEXT_BUNDLE_FILE, "budgeted context index; read fields on demand", "{quickStart,validation:{agentContextBundleVerification,attentionPack,preEditRisk,freshnessGate},memory:{budget},process:{budget},architecture:{budget},handoff:{budget}}"),
+    stateFileRecord(projectDir, CONTINUITY_DETAIL_FILE, "on-demand continuity details that are no longer embedded in continuity.json", "{phaseLedger,checkpointLedger,decisionLedger,temporalProvenance,stateBoundary,runtimeEval,hookIngressAudit,startProtocol}"),
+    stateFileRecord(projectDir, CONTRACT_FILE, "agent-neutral continuity contract", "{status,agentState,inspectOrder,proofChecklist,freshnessGate,handoffLifecycle}"),
+    stateFileRecord(projectDir, AGENT_RUNBOOK_FILE, "executable takeover steps and proof gates", "{activeStepId,nextCommand,steps,proofGates}"),
+    stateFileRecord(projectDir, MEMORY_GRAPH_FILE, "durable memory graph source", "{nodeCount,edgeCount,provenanceCoverage,nodes:.nodes[0:12],edges:.edges[0:16]}"),
+    stateFileRecord(projectDir, PROCESS_TRACE_FILE, "durable process cursor source", "{current,previous,next,inspectOrder,events:.events[0:8]}"),
+    stateFileRecord(projectDir, DEVELOPMENT_TRAIL_FILE, "process-to-file trail and edit risk source", "{status,summary,current,steps:.steps[0:8],inspectOrder}"),
+    stateFileRecord(projectDir, ARCHITECTURE_MAP_FILE, "architecture and code graph source", "{totals,impact,recentChanges:.recentChanges[0:12],codeGraph:{status,nodeCount,edgeCount,changedImpact:.changedImpact[0:8]}}"),
+    stateFileRecord(projectDir, TAKEOVER_PACKET_FILE, "first actions, guardrails, and next command", "{status,canResume,cursor,nextCommand,firstActions,firstRead,guardrails}"),
+    stateFileRecord(projectDir, CONTINUITY_AUDIT_FILE, "handoff artifact readiness audit", "{status,canResume,score,checks,blockers,warnings}"),
+    stateFileRecord(projectDir, TAKEOVER_ACCEPTANCE_AUDIT_FILE, "user-objective takeover acceptance audit", "{status,canResume,score,rows,blockers,warnings}"),
+    stateFileRecord(projectDir, GOVERNANCE_SPEC_FILE, "product-level memory/process/architecture/handoff contract", "{status,requirements,principles,capabilities}"),
+    stateFileRecord(projectDir, STATE_MANIFEST_FILE, "hash manifest for handoff files", "{aggregateHash,fileCount,missing,files:.files[0:16]}")
+  ];
+}
+
+function buildContinuitySourceSummaries(packet = {}, detail = {}, bundle = null, takeoverSummary = null) {
+  return {
+    takeoverSummary: objectSummary(takeoverSummary, stateRef(TAKEOVER_SUMMARY_FILE), "takeoverSummary"),
+    agentContextBundle: objectSummary(bundle, stateRef(AGENT_CONTEXT_BUNDLE_FILE), "agentContextBundle"),
+    continuityDetail: objectSummary(detail, stateRef(CONTINUITY_DETAIL_FILE), "continuityDetail"),
+    continuityContract: objectSummary(packet.continuityContract, stateRef(CONTRACT_FILE), "continuityContract"),
+    agentRunbook: objectSummary(packet.agentRunbook, stateRef(AGENT_RUNBOOK_FILE), "agentRunbook"),
+    governanceSpec: objectSummary(packet.governanceSpec, stateRef(GOVERNANCE_SPEC_FILE), "governanceSpec"),
+    memoryGraph: objectSummary(packet.memoryGraph, stateRef(MEMORY_GRAPH_FILE), "memoryGraph"),
+    processTrace: objectSummary(packet.processTrace, stateRef(PROCESS_TRACE_FILE), "processTrace"),
+    developmentTrail: objectSummary(packet.developmentTrail, stateRef(DEVELOPMENT_TRAIL_FILE), "developmentTrail"),
+    architectureMap: objectSummary(packet.architectureMap, stateRef(ARCHITECTURE_MAP_FILE), "architectureMap"),
+    takeoverPacket: objectSummary(packet.takeoverPacket || packet.takeoverDrill?.nextAgentBrief, stateRef(TAKEOVER_PACKET_FILE), "takeoverPacket"),
+    continuityAudit: objectSummary(packet.continuityAudit, stateRef(CONTINUITY_AUDIT_FILE), "continuityAudit"),
+    takeoverAcceptanceAudit: objectSummary(packet.takeoverAcceptanceAudit, stateRef(TAKEOVER_ACCEPTANCE_AUDIT_FILE), "takeoverAcceptanceAudit")
+  };
+}
+
+function buildContinuityDetailSummaries(detail = {}) {
+  return Object.fromEntries(CONTINUITY_DETAIL_FIELDS
+    .filter((field) => CONTINUITY_DETAIL_SUMMARY_FIELDS.has(field) && detail[field] !== undefined)
+    .map((field) => [field, objectSummary(detail[field], `${stateRef(CONTINUITY_DETAIL_FILE)}#${field}`, field)]));
+}
+
+function buildLeanContinuity(projectDir, packet = {}, options = {}) {
+  const detail = options.detail || buildContinuityDetail(packet);
+  const bundle = options.agentContextBundle || null;
+  const takeoverSummary = options.takeoverSummary || null;
+  const sourceRefs = buildContinuitySourceRefs(projectDir);
+  const onDemandReads = sourceRefs
+    .filter((ref) => ref.jq)
+    .map((ref) => ({
+      ref: ref.path,
+      label: ref.reason,
+      command: `jq '${ref.jq}' ${ref.path}`,
+      api: `/api/context-read?ref=${encodeURIComponent(ref.path)}`
+    }));
+  const lean = {
+    schemaVersion: 1,
+    storageSchemaVersion: "project-agent.continuity-manifest.v1",
+    generatedAt: packet.generatedAt || nowIso(),
+    project: packet.project || null,
+    role: packet.role || null,
+    purpose: "Lean summary-first continuity manifest. Start with takeover-summary.json; read details by source ref only when needed.",
+    mode: "summary-first",
+    retrieval: {
+      mode: "grep-first",
+      summary: "Use local grep/context search for snippets and refs, then read exact refs on demand.",
+      queryCommand: "npm run grep-context -- --project-dir \"$PROJECT_DIR\" --query \"<task>\" --limit 8",
+      readCommand: "npm run grep-context -- --project-dir \"$PROJECT_DIR\" --read \"<ref>\" --max-bytes 6000"
+    },
+    activeGoal: packet.activeGoal || null,
+    currentStep: packet.currentStep || null,
+    workstream: packet.workstream || packet.workstreams?.active || null,
+    workstreams: packet.workstreams
+      ? {
+          active: packet.workstreams.active || packet.workstream || null,
+          count: packet.workstreams.items?.length || packet.workstreams.workstreams?.length || 0
+        }
+      : null,
+    processCursor: eventSummary(packet.processCursor),
+    previousEvent: eventSummary(packet.previousEvent),
+    nextEvent: eventSummary(packet.nextEvent),
+    recentEvents: (packet.recentEvents || []).slice(0, 8).map(eventSummary).filter(Boolean),
+    openTargets: (packet.openTargets || []).slice(0, 8),
+    changedFiles: (packet.changedFiles || []).slice(0, 12).map(fileChangeSummary),
+    architectureImpact: packet.architectureImpact
+      ? {
+          totals: packet.architectureImpact.totals || {},
+          topFolders: (packet.architectureImpact.topFolders || packet.architectureImpact.folders || []).slice(0, 6)
+        }
+      : null,
+    architectureTotals: packet.architectureTotals || packet.architectureMap?.totals || {},
+    interruptedWork: packet.interruptedWork || { count: 0, items: [] },
+    agentLeases: (packet.agentLeases || []).slice(0, 8),
+    handoffSnapshot: packet.handoffSnapshot
+      ? {
+          status: packet.handoffSnapshot.status,
+          reason: packet.handoffSnapshot.reason,
+          updatedAt: packet.handoffSnapshot.updatedAt,
+          refs: (packet.handoffSnapshot.refs || []).slice?.(0, 6) || []
+        }
+      : null,
+    handoffId: packet.handoffId || null,
+    takeoverReadiness: packet.takeoverReadiness
+      ? {
+          status: packet.takeoverReadiness.status,
+          canTakeOver: packet.takeoverReadiness.canTakeOver,
+          summary: packet.takeoverReadiness.summary,
+          blockers: (packet.takeoverReadiness.blockers || []).slice(0, 8),
+          warnings: (packet.takeoverReadiness.warnings || []).slice(0, 8)
+        }
+      : null,
+    startProtocol: startProtocolSummary(packet.startProtocol),
+    stateRefs: [...new Set([stateRef(TAKEOVER_SUMMARY_FILE), stateRef(CONTINUITY_DETAIL_FILE), ...(packet.stateRefs || [])])],
+    nextAgentInstructions: (packet.nextAgentInstructions || []).slice(0, 8).map((item) => compact(item, 180)),
+    sourceRefs: sourceRefs.map(({ jq, ...ref }) => ref),
+    onDemandReads,
+    continuityDetailRef: {
+      path: stateRef(CONTINUITY_DETAIL_FILE),
+      reason: "Detail fields moved out of continuity.json to keep default takeover context small.",
+      jq: "{phaseLedger,checkpointLedger,decisionLedger,temporalProvenance,stateBoundary,runtimeEval,hookIngressAudit,startProtocol}"
+    },
+    agentContextBundleRef: {
+      path: stateRef(AGENT_CONTEXT_BUNDLE_FILE),
+      reason: "Budgeted context index; read only targeted fields on demand.",
+      contentHash: bundle?.contentHash || null
+    },
+    takeoverSummaryRef: {
+      path: stateRef(TAKEOVER_SUMMARY_FILE),
+      reason: "Default cold-start packet.",
+      budget: takeoverSummary?.budget || null
+    },
+    sourceSummaries: buildContinuitySourceSummaries(packet, detail, bundle, takeoverSummary),
+    detailSummaries: buildContinuityDetailSummaries(detail),
+    continuityManifest: {
+      schemaVersion: "project-agent.continuity-storage-manifest.v1",
+      mode: "summary-first",
+      generatedAt: packet.generatedAt || nowIso(),
+      defaultRead: stateRef(TAKEOVER_SUMMARY_FILE),
+      detailRead: stateRef(CONTINUITY_DETAIL_FILE),
+      rules: [
+        "Do not embed agentContextBundle or takeoverSummary in continuity.json.",
+        "Read takeover-summary.json first, then use grep/context-read refs for exact details.",
+        "Treat continuity-detail.json, agent-context-bundle.json, and source files as on-demand reads."
+      ],
+      files: sourceRefs.map(({ jq, ...ref }) => ref),
+      omittedInlineFields: [
+        "agentContextBundle",
+        "takeoverSummary",
+        "continuityContract",
+        "agentRunbook",
+        "memoryGraph",
+        "processTrace",
+        "developmentTrail",
+        "architectureMap",
+        "takeoverPacket",
+        "governanceSpec"
+      ],
+      detailFields: detail.fields || []
+    }
+  };
+  lean.continuityManifest.budget = continuityBudget(lean);
+  const finalBudget = continuityBudget(lean);
+  lean.continuityManifest.budget = finalBudget;
+  return lean;
+}
+
 function budgetedMemorySection(memoryGraph, graphTrace) {
   const full = { graph: memoryGraph || null, graphTrace: graphTrace || null };
   const budget = sectionBudget("memory", full, SECTION_BUDGETS.memory);
@@ -1616,6 +2014,9 @@ export function writeTakeoverSummary(projectDir, summary = buildTakeoverSummary(
 }
 
 export function buildAgentContextBundle(projectDir, continuity = readContinuity(projectDir) || {}, options = {}) {
+  continuity = hydrateContinuityFromDetail(projectDir, continuity, options);
+  const previousBundle = options.previousBundle || readAgentContextBundle(projectDir) || null;
+  const previousValidation = previousBundle?.validation || {};
   const stateManifest = options.stateManifest || readStateManifest(projectDir) || continuity.stateManifest || null;
   const stateManifestVerification = options.stateManifestVerification || verifyStateManifest(projectDir, stateManifest);
   const takeoverPacket = continuity.takeoverPacket || continuity.takeoverDrill?.nextAgentBrief || readTakeoverPacket(projectDir) || null;
@@ -1676,15 +2077,15 @@ export function buildAgentContextBundle(projectDir, continuity = readContinuity(
     validation: {
       stateManifest,
       stateManifestVerification,
-      freshnessGate: continuity.freshnessGate || continuity.continuityContract?.freshnessGate || null,
-      phaseLedger: continuity.phaseLedger || continuity.continuityContract?.phaseLedger || null,
-      checkpointLedger: continuity.checkpointLedger || continuity.continuityContract?.checkpointLedger || null,
-      decisionLedger: continuity.decisionLedger || continuity.continuityContract?.decisionLedger || null,
-      temporalProvenance: continuity.temporalProvenance || continuity.continuityContract?.temporalProvenance || null,
-      stateBoundary: continuity.stateBoundary || continuity.continuityContract?.stateBoundary || null,
-      runtimeEval: continuity.runtimeEval || continuity.continuityContract?.runtimeEval || null,
-      hookIngressAudit: continuity.hookIngressAudit || continuity.continuityContract?.hookIngressAudit || null,
-      objectiveCoverage: continuity.objectiveCoverage || null,
+      freshnessGate: selectValidationField("freshnessGate", continuity.freshnessGate, previousValidation.freshnessGate, continuity.continuityContract?.freshnessGate),
+      phaseLedger: selectValidationField("phaseLedger", continuity.phaseLedger, previousValidation.phaseLedger, continuity.continuityContract?.phaseLedger),
+      checkpointLedger: selectValidationField("checkpointLedger", continuity.checkpointLedger, previousValidation.checkpointLedger, continuity.continuityContract?.checkpointLedger),
+      decisionLedger: selectValidationField("decisionLedger", continuity.decisionLedger, previousValidation.decisionLedger, continuity.continuityContract?.decisionLedger),
+      temporalProvenance: selectValidationField("temporalProvenance", continuity.temporalProvenance, previousValidation.temporalProvenance, continuity.continuityContract?.temporalProvenance),
+      stateBoundary: selectValidationField("stateBoundary", continuity.stateBoundary, previousValidation.stateBoundary, continuity.continuityContract?.stateBoundary),
+      runtimeEval: selectValidationField("runtimeEval", continuity.runtimeEval, previousValidation.runtimeEval, continuity.continuityContract?.runtimeEval),
+      hookIngressAudit: selectValidationField("hookIngressAudit", continuity.hookIngressAudit, previousValidation.hookIngressAudit, continuity.continuityContract?.hookIngressAudit),
+      objectiveCoverage: selectValidationField("objectiveCoverage", continuity.objectiveCoverage, previousValidation.objectiveCoverage),
       takeoverAcceptanceAudit: continuity.takeoverAcceptanceAudit || readTakeoverAcceptanceAudit(projectDir) || null,
       sourceFiles: stateManifest?.files?.map((file) => ({
         path: file.path,
@@ -2752,12 +3153,12 @@ export function summarizeAgentLeases(runtime, now = Date.now()) {
 
 export function writeContinuity(projectDir, packet) {
   mkdirSync(stateDir(projectDir), { recursive: true });
+  const previousDetail = readContinuityDetail(projectDir) || {};
   const next = {
     schemaVersion: 1,
     generatedAt: nowIso(),
     ...packet
   };
-  writeFileSync(continuityPath(projectDir), `${JSON.stringify(next, null, 2)}\n`, "utf8");
   if (next.continuityContract) {
     writeFileSync(contractPath(projectDir), `${JSON.stringify(next.continuityContract, null, 2)}\n`, "utf8");
   }
@@ -2789,8 +3190,10 @@ export function writeContinuity(projectDir, packet) {
   if (next.governanceSpec) {
     writeFileSync(governanceSpecPath(projectDir), `${JSON.stringify(next.governanceSpec, null, 2)}\n`, "utf8");
   }
+  next.continuityDetail = writeContinuityDetail(projectDir, buildContinuityDetail({ ...previousDetail, ...next }));
   next.stateManifest = writeStateManifest(projectDir);
   next.agentContextBundle = writeAgentContextBundle(projectDir, buildAgentContextBundle(projectDir, next, {
+    continuityDetail: next.continuityDetail,
     stateManifest: next.stateManifest,
     stateManifestVerification: verifyStateManifest(projectDir, next.stateManifest)
   }));
@@ -2798,11 +3201,38 @@ export function writeContinuity(projectDir, packet) {
     bundle: next.agentContextBundle,
     verification: verifyAgentContextBundle(projectDir, next.agentContextBundle)
   }));
-  return next;
+  next.continuityDetail = writeContinuityDetail(projectDir, buildContinuityDetail({ ...previousDetail, ...next }));
+  const leanContinuity = buildLeanContinuity(projectDir, next, {
+    detail: next.continuityDetail,
+    agentContextBundle: next.agentContextBundle,
+    takeoverSummary: next.takeoverSummary
+  });
+  writeFileSync(continuityPath(projectDir), `${JSON.stringify(leanContinuity, null, 2)}\n`, "utf8");
+  return {
+    ...next,
+    storageSchemaVersion: leanContinuity.storageSchemaVersion,
+    mode: leanContinuity.mode,
+    continuityManifest: leanContinuity.continuityManifest,
+    continuityDetailRef: leanContinuity.continuityDetailRef,
+    agentContextBundleRef: leanContinuity.agentContextBundleRef,
+    takeoverSummaryRef: leanContinuity.takeoverSummaryRef,
+    sourceSummaries: leanContinuity.sourceSummaries,
+    detailSummaries: leanContinuity.detailSummaries
+  };
 }
 
 export function readContinuity(projectDir) {
   const file = continuityPath(projectDir);
+  if (!existsSync(file)) return null;
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+export function readContinuityDetail(projectDir) {
+  const file = continuityDetailPath(projectDir);
   if (!existsSync(file)) return null;
   try {
     return JSON.parse(readFileSync(file, "utf8"));
@@ -2923,20 +3353,28 @@ export function readStateManifest(projectDir) {
 
 export function readAgentContextBundle(projectDir) {
   const file = agentContextBundlePath(projectDir);
-  if (!existsSync(file)) return readContinuity(projectDir)?.agentContextBundle || null;
+  const fallback = () => {
+    const bundle = readContinuity(projectDir)?.agentContextBundle || null;
+    return bundle?.schemaVersion === "project-agent.context-bundle.v1" ? bundle : null;
+  };
+  if (!existsSync(file)) return fallback();
   try {
     return JSON.parse(readFileSync(file, "utf8"));
   } catch {
-    return readContinuity(projectDir)?.agentContextBundle || null;
+    return fallback();
   }
 }
 
 export function readTakeoverSummary(projectDir) {
   const file = takeoverSummaryPath(projectDir);
-  if (!existsSync(file)) return readContinuity(projectDir)?.takeoverSummary || null;
+  const fallback = () => {
+    const summary = readContinuity(projectDir)?.takeoverSummary || null;
+    return summary?.schemaVersion === "project-agent.takeover-summary.v1" ? summary : null;
+  };
+  if (!existsSync(file)) return fallback();
   try {
     return JSON.parse(readFileSync(file, "utf8"));
   } catch {
-    return readContinuity(projectDir)?.takeoverSummary || null;
+    return fallback();
   }
 }

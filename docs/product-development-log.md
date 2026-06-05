@@ -2,7 +2,9 @@
 
 日期：2026-06-05  
 最新本地提交：`feat: add summary-first takeover and cli terminal bridge`（以 `git log` 为准）  
-当前状态：Summary-first takeover、grep-first retrieval、CLI Agent terminal bridge 已实现并验证；远端 `origin` 尚未配置，暂不能 push 到 GitHub。
+当前状态：Summary-first takeover、grep-first retrieval、CLI Agent terminal bridge、lean continuity manifest 已实现并验证；远端 `origin` 尚未配置，暂不能 push 到 GitHub。
+
+更新：基于 agentmemory、RAVBYTE、ai-memory、Graphiti、Repomix/Gitingest 等参考项目的共同模式，`continuity.json` 已从 full-state dump 改成 lean manifest。默认文件只保留 summary、budget、hash、source refs 和 on-demand reads；rich audit/detail 移到 `.project-agent/continuity-detail.json`，由 bundle 构建和 API 在需要时 hydrate。
 
 更新：接手协议已从“把大包塞给模型”改为 summary-first。`.project-agent/takeover-summary.json` 成为默认入口，`agent-context-bundle.json` 改为预算化索引；memory/process/architecture/handoff 超预算时只披露摘要、hash 和 source refs，由接手 agent 按需读取。
 
@@ -159,6 +161,18 @@ Benchmark 结论已经沉淀在 `docs/research/agent-governance-landscape.md`。
 
 产品价值：Project Agent Terminal 的“记忆”不再只是把状态压缩给模型，而是形成 grep-first、refs-first、on-demand reads 的本地检索协议。terminal 仍是所有 CLI Agent 的执行入口，避免把 agent 启动做成额外 UI 按钮。
 
+### 13. Lean Continuity Manifest
+
+根据 GitHub 参考项目的实现方式，继续压缩默认接手面：
+
+- `.project-agent/continuity.json` 不再内嵌 `agentContextBundle` 或 `takeoverSummary`。
+- `.project-agent/continuity-detail.json` 保存 phase/checkpoint/decision/temporal/state-boundary/runtime/hook 等 rich detail，只有按 ref 读取时才进入上下文。
+- `writeContinuity()` 返回给当前进程的对象仍是 hydrated 版本，保持 UI/API/smoke 兼容；磁盘默认文件则是 summary-first manifest。
+- `buildAgentContextBundle()` 支持从 full continuity、continuity-detail、既有 bundle validation、continuity contract 逐级补齐，避免 CLI 重建时把 rich audit 降级成 compact summary。
+- smoke + context + codex-smoke 串联后 `continuity.json` 约 52KB，内部预算约 10.2k tokens；此前 demo continuity 曾超过 800KB，粗估 20 万 tokens。
+
+产品价值：这一步把“记忆管理会不会挤爆上下文”的风险从架构上拆开。默认接手只读小包和索引，细节保存在可 grep、可 hash、可按需读取的本地文件里。
+
 ## 四、当前验证状态
 
 当前版本已验证：
@@ -166,6 +180,7 @@ Benchmark 结论已经沉淀在 `docs/research/agent-governance-landscape.md`。
 - `node --check` 通过相关 server 文件。
 - `npm run build` 通过，只有 Vite chunk size warning。
 - `PORT=4159 npm test` 通过，输出 `smoke ok`。
+- 固定 smoke + context + codex-smoke 样本显示 `.project-agent/continuity.json` 约 52KB，`storageSchemaVersion=project-agent.continuity-manifest.v1`，不再包含 `agentContextBundle` / `takeoverSummary`。
 - `npm run grep-context -- --project-dir demo-project --query "grep-first takeover codex terminal" --limit 5` 通过。
 - `npm run cli-agent -- --project-dir demo-project` 通过，生成 `.project-agent/cli-agent-bootstrap.md` 和 Codex 启动命令。
 - 产品 terminal 后端显示 `connected / python-pty`。

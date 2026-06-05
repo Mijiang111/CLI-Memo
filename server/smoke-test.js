@@ -495,8 +495,33 @@ try {
   if (takeoverSummaryFile.schemaVersion !== "project-agent.takeover-summary.v1" || takeoverSummaryFile.budget?.status !== "ok" || typeof takeoverSummaryFile.takeover?.canTakeOver !== "boolean" || !takeoverSummaryFile.onDemandReads?.length || takeoverSummaryFile.defaultReadOrder?.[0] !== ".project-agent/takeover-summary.json") {
     throw new Error(`takeover summary file missing lean takeover contract: ${JSON.stringify(takeoverSummaryFile)}`);
   }
+  const continuityRaw = readFileSync(path.join(projectDir, ".project-agent", "continuity.json"), "utf8");
+  const continuityFile = JSON.parse(continuityRaw);
+  const continuityDetailFile = JSON.parse(readFileSync(path.join(projectDir, ".project-agent", "continuity-detail.json"), "utf8"));
+  if (
+    continuityFile.storageSchemaVersion !== "project-agent.continuity-manifest.v1" ||
+    continuityFile.mode !== "summary-first" ||
+    continuityFile.continuityManifest?.mode !== "summary-first" ||
+    continuityFile.continuityManifest?.budget?.status !== "ok" ||
+    continuityRaw.length > 60000 ||
+    continuityFile.agentContextBundle ||
+    continuityFile.takeoverSummary ||
+    continuityFile.continuityContract ||
+    continuityFile.memoryGraph ||
+    continuityFile.processTrace ||
+    continuityFile.architectureMap ||
+    continuityFile.agentContextBundleRef?.path !== ".project-agent/agent-context-bundle.json" ||
+    continuityFile.takeoverSummaryRef?.path !== ".project-agent/takeover-summary.json" ||
+    continuityFile.continuityDetailRef?.path !== ".project-agent/continuity-detail.json" ||
+    !continuityFile.onDemandReads?.some((read) => read.ref === ".project-agent/continuity-detail.json")
+  ) {
+    throw new Error(`continuity file is not a lean summary-first manifest: ${JSON.stringify({ bytes: continuityRaw.length, storageSchemaVersion: continuityFile.storageSchemaVersion, mode: continuityFile.mode, budget: continuityFile.continuityManifest?.budget, hasBundle: Boolean(continuityFile.agentContextBundle), hasSummary: Boolean(continuityFile.takeoverSummary) })}`);
+  }
+  if (continuityDetailFile.schemaVersion !== "project-agent.continuity-detail.v1" || !continuityDetailFile.fields?.includes("phaseLedger") || !continuityDetailFile.fields?.includes("startProtocol")) {
+    throw new Error(`continuity detail file missing on-demand detail fields: ${JSON.stringify(continuityDetailFile)}`);
+  }
   const stateManifestFile = JSON.parse(readFileSync(path.join(projectDir, ".project-agent", "state-manifest.json"), "utf8"));
-  if (stateManifestFile.schemaVersion !== "project-agent.state-manifest.v1" || !stateManifestFile.aggregateHash || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-summary.json") || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-packet.json" && file.sha256) || !stateManifestFile.files?.some((file) => file.path === ".project-agent/development-trail.json" && file.sha256) || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-acceptance-audit.json" && file.sha256)) {
+  if (stateManifestFile.schemaVersion !== "project-agent.state-manifest.v1" || !stateManifestFile.aggregateHash || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-summary.json") || !stateManifestFile.files?.some((file) => file.path === ".project-agent/continuity-detail.json" && file.sha256) || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-packet.json" && file.sha256) || !stateManifestFile.files?.some((file) => file.path === ".project-agent/development-trail.json" && file.sha256) || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-acceptance-audit.json" && file.sha256)) {
     throw new Error(`state manifest file missing takeover packet hash: ${JSON.stringify(stateManifestFile)}`);
   }
   const nextAgentPromptFile = readFileSync(path.join(projectDir, ".project-agent", "next-agent-prompt.md"), "utf8");

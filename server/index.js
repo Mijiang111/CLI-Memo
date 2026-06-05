@@ -10,6 +10,7 @@ import { buildInsights } from "./insights.js";
 import { buildArchitecture } from "./architecture.js";
 import {
   readContinuity,
+  readContinuityDetail,
   readAgentRunbook,
   readContinuityContract,
   readArchitectureMap,
@@ -170,7 +171,9 @@ app.get("/api/memory-graph", (req, res) => {
 });
 
 app.get("/api/governance", (req, res) => {
-  res.json({ governance: readContinuity(projectDir)?.governance || null });
+  const continuity = readContinuity(projectDir) || {};
+  const detail = readContinuityDetail(projectDir) || {};
+  res.json({ governance: continuity.governance || detail.governance || null });
 });
 
 app.get("/api/governance-spec", (req, res) => {
@@ -286,7 +289,9 @@ app.post("/api/codex-takeover-smoke", (req, res) => {
 });
 
 app.get("/api/graph-trace", (req, res) => {
-  res.json({ graphTrace: readContinuity(projectDir)?.graphTrace || null });
+  const continuity = readContinuity(projectDir) || {};
+  const detail = readContinuityDetail(projectDir) || {};
+  res.json({ graphTrace: continuity.graphTrace || detail.graphTrace || null });
 });
 
 app.get("/api/process-trace", (req, res) => {
@@ -298,7 +303,9 @@ app.get("/api/development-trail", (req, res) => {
 });
 
 app.get("/api/architecture-trace", (req, res) => {
-  res.json({ architectureTrace: readContinuity(projectDir)?.architectureTrace || null });
+  const continuity = readContinuity(projectDir) || {};
+  const detail = readContinuityDetail(projectDir) || {};
+  res.json({ architectureTrace: continuity.architectureTrace || detail.architectureTrace || null });
 });
 
 app.get("/api/architecture-map", (req, res) => {
