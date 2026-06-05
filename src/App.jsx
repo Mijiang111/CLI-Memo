@@ -1024,6 +1024,7 @@ function FreshnessGatePanel({ gate }) {
   const tone = freshnessTone(gate.status);
   const checks = gate.checks || [];
   const validity = gate.validity || {};
+  const git = gate.git || {};
   return (
     <section className="insight-section freshness-gate" data-freshness-gate=".project-agent/agent-context-bundle.json">
       <div className="insight-heading">
@@ -1035,6 +1036,12 @@ function FreshnessGatePanel({ gate }) {
         <span title={validity.observedAt || gate.observedAt || ""}>observed {validity.observedAt || gate.observedAt || "unknown"}</span>
         <span title={validity.validUntil || ""}>valid until {validity.validUntil || "unknown"}</span>
         <span className={gate.staleChecks?.length ? "warn" : "ok"}>stale {gate.staleChecks?.length || 0}</span>
+      </div>
+      <div className="audit-counts">
+        <span className={git.status === "clean" ? "ok" : git.status ? "warn" : "muted"}>git {git.status || "unknown"}</span>
+        <span className={git.repo?.head ? "ok" : "warn"}>head {git.repo?.head || git.repo?.branch || "none"}</span>
+        <span className={git.dirty?.entries ? "warn" : "ok"}>dirty {git.dirty?.entries || 0}</span>
+        <span className={git.dirty?.untracked ? "warn" : "ok"}>untracked {git.dirty?.untracked || 0}</span>
       </div>
       <div className="freshness-checks">
         {checks.slice(0, 5).map((check) => (

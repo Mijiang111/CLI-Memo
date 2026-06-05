@@ -497,6 +497,7 @@ function buildAttentionPack(bundle = {}, options = {}) {
   const nextExpected = quick.nextExpected || bundle.process?.trace?.next || {};
   const lifecycle = bundle.handoff?.lifecycle || {};
   const freshness = bundle.validation?.freshnessGate || {};
+  const gitFreshness = freshness.git || {};
   const runtimeEval = bundle.validation?.runtimeEval || {};
   const phaseLedger = bundle.validation?.phaseLedger || {};
   const checkpointLedger = bundle.validation?.checkpointLedger || {};
@@ -573,8 +574,8 @@ function buildAttentionPack(bundle = {}, options = {}) {
       "freshness",
       ["expired", "stale"].includes(freshness.status) ? 94 : 84,
       "Freshness Gate",
-      `${freshness.status || "unknown"} freshness. ${freshness.summary || "No temporal freshness summary is embedded."}`,
-      freshness.refs || [".project-agent/process-trace.json", ".project-agent/architecture-map.json", ".project-agent/state-manifest.json"],
+      `${freshness.status || "unknown"} freshness. git=${gitFreshness.status || "unknown"}${gitFreshness.dirty?.entries ? ` dirty=${gitFreshness.dirty.entries}` : ""}. ${freshness.summary || "No temporal freshness summary is embedded."}`,
+      [...(freshness.refs || [".project-agent/process-trace.json", ".project-agent/architecture-map.json", ".project-agent/state-manifest.json"]), ...(gitFreshness.refs || [])],
       { action: freshness.nextAction || "Record a fresh current event before editing." }
     ),
     attentionItem(
@@ -861,8 +862,10 @@ function buildProvenanceLedger(bundle = {}) {
       "freshness_gate",
       "Freshness Gate",
       ["stale", "expired"].includes(freshness.status) ? "warn" : freshness.status ? "ok" : "warn",
-      freshness.summary || "No freshness gate summary.",
-      freshness.refs || [".project-agent/agent-context-bundle.json", ".project-agent/process-trace.json"],
+      freshness.git?.status
+        ? `${freshness.summary || "No freshness gate summary."} Git ${freshness.git.status}${freshness.git.dirty?.entries ? ` with ${freshness.git.dirty.entries} dirty change(s)` : ""}.`
+        : freshness.summary || "No freshness gate summary.",
+      [...(freshness.refs || [".project-agent/agent-context-bundle.json", ".project-agent/process-trace.json"]), ...(freshness.git?.refs || [])],
       {
         observedAt: freshness.validity?.observedAt || freshness.observedAt || null,
         validFrom: freshness.validity?.validFrom || null,

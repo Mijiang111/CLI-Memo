@@ -360,7 +360,7 @@ Scores are relative to Project Agent Terminal's target, not to each project narr
 | Capability | Best reference | Current Project Agent Terminal | Gap |
 | --- | --- | --- | --- |
 | Cross-agent capture | Akita, rohit | Medium: terminal/runtime events and CLI wrappers | More hook adapters and backpressure |
-| Durable takeover files | RAVBYTE, Akita | High: `.project-agent/` bundle, manifest, prompt, audit | Freshness against git and artifact hashes can get stricter |
+| Durable takeover files | RAVBYTE, Akita | High: `.project-agent/` bundle, manifest, prompt, audit, git freshness warning | Freshness can still get stricter with commit-bound artifact hashes |
 | Source-of-truth separation | Akita, RepoWise | Medium: durable JSON/MD files, no derived DB yet | Define raw/event/wiki/index boundaries |
 | Temporal provenance | Graphiti | Medium-low: provenance refs exist, temporal validity is shallow | Add validity windows and contradiction/staleness |
 | Code architecture intelligence | RepoWise, CodeBoarding | Medium: architecture map and development trail | Add real code graph adapter or import path |
@@ -408,7 +408,7 @@ Scores are relative to Project Agent Terminal's target, not to each project narr
 | External pattern | Product translation |
 | --- | --- |
 | Axiom journal queue and top-of-mind note | `.project-agent/agent-context-bundle.json` plus bounded next-agent prompt |
-| RAVBYTE worklog, handoff, freshness validator | process trace, takeover packet, state manifest, acceptance audit |
+| RAVBYTE worklog, handoff, freshness validator | process trace, takeover packet, state manifest, git freshness, acceptance audit |
 | Akita hook router, sanitizer, backpressure, source/index split, typed handoff | sanitized hook ingress, 429 backpressure audit, state boundary audit, and handoff state machine |
 | Graphiti temporal fact edges | provenance-backed memory graph with validity windows |
 | RepoWise risk and decision intelligence | pre-edit risk panel and evidence-backed decisions |

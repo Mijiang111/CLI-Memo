@@ -416,6 +416,7 @@ app.get(
       packet = await runJson(projectDir, args);
     }
     const insights = await buildInsights({
+      projectDir,
       rawState,
       summary,
       packet,

@@ -8,6 +8,7 @@ const port = Number(process.env.PORT || 4147);
 const base = `http://127.0.0.1:${port}`;
 const ownsProjectDir = !process.env.PROJECT_DIR;
 const projectDir = process.env.PROJECT_DIR || mkdtempSync(path.join(os.tmpdir(), "project-agent-terminal-smoke-"));
+const gitSmokeInitialized = ownsProjectDir && spawnSync("git", ["init"], { cwd: projectDir, encoding: "utf8" }).status === 0;
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -301,6 +302,9 @@ try {
   if (contextBundleEndpoint.agentContextBundle?.validation?.disclosureGate?.packing?.schemaVersion !== "project-agent.prompt-packing-gate.v1" || !contextBundleEndpoint.agentContextBundle?.validation?.disclosureGate?.packing?.limits?.maxFiles || !Array.isArray(contextBundleEndpoint.agentContextBundle?.validation?.disclosureGate?.packing?.omittedRefs)) {
     throw new Error(`agent context bundle endpoint missing prompt packing gate: ${JSON.stringify(contextBundleEndpoint.agentContextBundle?.validation?.disclosureGate)}`);
   }
+  if (gitSmokeInitialized && (contextBundleEndpoint.agentContextBundle?.validation?.freshnessGate?.git?.schemaVersion !== "project-agent.git-freshness.v1" || contextBundleEndpoint.agentContextBundle?.validation?.freshnessGate?.git?.repo?.available !== true || !contextBundleEndpoint.agentContextBundle?.validation?.freshnessGate?.checks?.some((check) => check.id === "git_snapshot"))) {
+    throw new Error(`agent context bundle endpoint missing git freshness: ${JSON.stringify(contextBundleEndpoint.agentContextBundle?.validation?.freshnessGate)}`);
+  }
   if (contextBundleEndpoint.verification?.schemaVersion !== "project-agent.context-bundle-verification.v1" || !contextBundleEndpoint.verification?.canResume || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "memory_graph" && check.status === "ok") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "objective_coverage") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "disclosure_gate") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "freshness_gate") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "phase_ledger") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "checkpoint_ledger") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "decision_ledger") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "state_boundary") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "runtime_eval") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "hook_ingress") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "provenance_ledger") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "attention_pack") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "pre_edit_risk") || !contextBundleEndpoint.verification?.checks?.some((check) => check.id === "handoff_lifecycle")) {
     throw new Error(`agent context bundle endpoint failed bundle-only verification: ${JSON.stringify(contextBundleEndpoint.verification)}`);
   }
@@ -334,6 +338,9 @@ try {
   }
   if (!contextPromptMarkdown.includes("backpressure:")) {
     throw new Error(`agent context prompt endpoint missing hook backpressure details: ${contextPromptMarkdown.slice(0, 500)}`);
+  }
+  if (gitSmokeInitialized && (!contextPromptMarkdown.includes("- git:") || !contextPromptMarkdown.includes("dirty tree:"))) {
+    throw new Error(`agent context prompt endpoint missing git freshness details: ${contextPromptMarkdown.slice(0, 500)}`);
   }
   if (!readFileSync(path.join(projectDir, ".project-agent", "context-starter-prompt.md"), "utf8").includes("Bundle-Only Next Agent Starter Prompt")) {
     throw new Error("context-starter-prompt.md was not written by endpoint");
@@ -436,6 +443,9 @@ try {
   if (agentContextBundleFile.validation?.disclosureGate?.packing?.schemaVersion !== "project-agent.prompt-packing-gate.v1" || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "prompt_packing_gate")) {
     throw new Error(`agent context bundle file missing prompt packing gate: ${JSON.stringify(agentContextBundleFile.validation?.disclosureGate)}`);
   }
+  if (gitSmokeInitialized && (agentContextBundleFile.validation?.freshnessGate?.git?.schemaVersion !== "project-agent.git-freshness.v1" || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "freshness_gate"))) {
+    throw new Error(`agent context bundle file missing git freshness: ${JSON.stringify(agentContextBundleFile.validation?.freshnessGate)}`);
+  }
   const stateManifestFile = JSON.parse(readFileSync(path.join(projectDir, ".project-agent", "state-manifest.json"), "utf8"));
   if (stateManifestFile.schemaVersion !== "project-agent.state-manifest.v1" || !stateManifestFile.aggregateHash || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-packet.json" && file.sha256) || !stateManifestFile.files?.some((file) => file.path === ".project-agent/development-trail.json" && file.sha256) || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-acceptance-audit.json" && file.sha256)) {
     throw new Error(`state manifest file missing takeover packet hash: ${JSON.stringify(stateManifestFile)}`);
@@ -452,6 +462,9 @@ try {
   }
   if (!nextAgentPromptFile.includes("backpressure:")) {
     throw new Error(`next-agent prompt file missing hook backpressure instructions: ${nextAgentPromptFile.slice(0, 500)}`);
+  }
+  if (gitSmokeInitialized && (!nextAgentPromptFile.includes("- git:") || !nextAgentPromptFile.includes("dirty tree:"))) {
+    throw new Error(`next-agent prompt file missing git freshness instructions: ${nextAgentPromptFile.slice(0, 500)}`);
   }
   const continuityAuditFile = JSON.parse(readFileSync(path.join(projectDir, ".project-agent", "continuity-audit.json"), "utf8"));
   if (continuityAuditFile.schemaVersion !== "project-agent.continuity-audit.v1" || !continuityAuditFile.canResume || !continuityAuditFile.checks?.some((check) => check.id === "takeover_packet" && check.status === "ok") || !continuityAuditFile.checks?.some((check) => check.id === "governance_spec" && check.status === "ok") || !continuityAuditFile.checks?.some((check) => check.id === "state_manifest" && check.status === "ok")) {
@@ -1091,6 +1104,9 @@ try {
   if (!autoPromptMarkdown.includes("backpressure:")) {
     throw new Error("auto next-agent prompt did not include hook backpressure details");
   }
+  if (gitSmokeInitialized && (!autoPromptMarkdown.includes("- git:") || !autoPromptMarkdown.includes("dirty tree:"))) {
+    throw new Error("auto next-agent prompt did not include git freshness details");
+  }
   if (!autoContextPromptMarkdown.includes("Bundle-Only Next Agent Starter Prompt") || !autoContextPromptMarkdown.includes(watchedRelPath) || !autoContextPromptMarkdown.includes("## Bundle Gate") || !autoContextPromptMarkdown.includes("## Attention Pack") || !autoContextPromptMarkdown.includes("## Phase Ledger") || !autoContextPromptMarkdown.includes("## Decision Ledger") || !autoContextPromptMarkdown.includes("## State Boundary") || !autoContextPromptMarkdown.includes("## Code Graph") || !autoContextPromptMarkdown.includes("## Hook Ingress") || !autoContextPromptMarkdown.includes("## Objective Coverage") || !autoContextPromptMarkdown.includes("Development trail:")) {
     throw new Error("auto context-starter prompt did not include bundle-only takeover instructions or watched architecture change");
   }
@@ -1102,6 +1118,9 @@ try {
   }
   if (!autoContextPromptMarkdown.includes("backpressure:")) {
     throw new Error("auto context-starter prompt did not include hook backpressure details");
+  }
+  if (gitSmokeInitialized && (!autoContextPromptMarkdown.includes("- git:") || !autoContextPromptMarkdown.includes("dirty tree:"))) {
+    throw new Error("auto context-starter prompt did not include git freshness details");
   }
   if (autoContextDrill.schemaVersion !== "project-agent.context-takeover-drill.v1" || !autoContextDrill.firstActions?.length || !autoContextDrill.checks?.some((check) => check.id === "bundle_verified")) {
     throw new Error(`auto context takeover drill did not include bundle-only rehearsal: ${JSON.stringify(autoContextDrill)}`);
@@ -1236,6 +1255,9 @@ try {
   if (finalInsights.continuity?.freshnessGate?.schemaVersion !== "project-agent.freshness-gate.v1" || !finalInsights.continuity?.continuityContract?.freshnessGate?.status) {
     throw new Error(`continuity missing temporal freshness gate: ${JSON.stringify(finalInsights.continuity?.freshnessGate)}`);
   }
+  if (gitSmokeInitialized && (finalInsights.continuity?.freshnessGate?.git?.schemaVersion !== "project-agent.git-freshness.v1" || finalInsights.continuity?.freshnessGate?.git?.repo?.available !== true || !finalInsights.continuity?.freshnessGate?.checks?.some((check) => check.id === "git_snapshot"))) {
+    throw new Error(`continuity missing git freshness audit: ${JSON.stringify(finalInsights.continuity?.freshnessGate)}`);
+  }
   if (finalInsights.continuity?.runtimeEval?.schemaVersion !== "project-agent.runtime-eval.v1" || !finalInsights.continuity?.continuityContract?.runtimeEval?.score || !finalInsights.continuity?.runtimeEval?.checks?.some((check) => check.id === "span_capture")) {
     throw new Error(`continuity missing runtime trace eval: ${JSON.stringify(finalInsights.continuity?.runtimeEval)}`);
   }
@@ -1335,6 +1357,9 @@ try {
   }
   if (!appSource.includes("HandoffLifecyclePanel") || !appSource.includes("data-handoff-lifecycle") || !appSource.includes("Handoff Lifecycle")) {
     throw new Error("UI source missing visible handoff lifecycle panel");
+  }
+  if (!appSource.includes("git {git.status") || !appSource.includes("dirty {git.dirty?.entries") || !appSource.includes("untracked {git.dirty?.untracked")) {
+    throw new Error("UI source missing visible git freshness details");
   }
   if (!appSource.includes("TakeoverAcceptancePanel") || !appSource.includes("data-takeover-acceptance") || !appSource.includes("Takeover Acceptance")) {
     throw new Error("UI source missing visible takeover acceptance audit");

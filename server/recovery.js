@@ -549,6 +549,7 @@ export async function buildRecoveryBrief(projectDir, options = {}) {
     packet = await runJson(projectDir, args);
   }
   const insights = await buildInsights({
+    projectDir,
     rawState,
     summary,
     packet,

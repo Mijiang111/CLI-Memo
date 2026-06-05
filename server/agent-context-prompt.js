@@ -69,6 +69,8 @@ export function renderAgentContextPrompt(bundle, verification = verifyAgentConte
     "",
     `- status: ${freshnessGate.status || "unknown"}`,
     `- valid until: ${freshnessGate.validity?.validUntil || "unknown"}`,
+    `- git: ${freshnessGate.git?.status || "unknown"}${freshnessGate.git?.repo?.head ? ` ${freshnessGate.git.repo.head}` : ""}${freshnessGate.git?.repo?.branch ? ` on ${freshnessGate.git.repo.branch}` : ""}`,
+    `- dirty tree: ${freshnessGate.git?.dirty?.entries || 0} change(s), ${freshnessGate.git?.dirty?.untracked || 0} untracked`,
     `- summary: ${freshnessGate.summary || "No temporal freshness gate is embedded."}`,
     freshnessGate.staleChecks?.length ? `- stale checks: ${freshnessGate.staleChecks.join(", ")}` : "- stale checks: none",
     `- next action: ${freshnessGate.nextAction || "Record a fresh current event before editing."}`,

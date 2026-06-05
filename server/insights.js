@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+
 const GRAPH_POSITIONS = {
   kernel: { x: 58, y: 70 },
   goal: { x: 190, y: 48 },
@@ -996,18 +998,115 @@ function latestIso(values = []) {
   return new Date(Math.max(...timestamps)).toISOString();
 }
 
-function buildFreshnessGate({ processTrace = {}, architectureTrace = {}, handoffLifecycle = {}, handoffSnapshot = null, preEditRisk = {}, agentLeases = [], interruptedWork = {} }) {
+function runGit(projectDir, args = []) {
+  if (!projectDir) return null;
+  try {
+    return execFileSync("git", ["-C", projectDir, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1200
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function parseGitStatusLine(line) {
+  if (!line) return null;
+  const code = line.slice(0, 2);
+  const indexStatus = line.slice(0, 1);
+  const worktreeStatus = line.slice(1, 2);
+  const rawPath = line.slice(3).trim();
+  const filePath = rawPath.includes(" -> ") ? rawPath.split(" -> ").pop() : rawPath;
+  return {
+    code,
+    indexStatus,
+    worktreeStatus,
+    path: filePath,
+    stateFile: filePath.startsWith(".project-agent/"),
+    untracked: code === "??",
+    staged: indexStatus !== " " && indexStatus !== "?" && indexStatus !== "!",
+    modified: code.includes("M"),
+    deleted: code.includes("D")
+  };
+}
+
+function buildGitFreshness(projectDir) {
+  const checkedAt = new Date().toISOString();
+  if (!projectDir || runGit(projectDir, ["rev-parse", "--is-inside-work-tree"]) !== "true") {
+    return {
+      schemaVersion: "project-agent.git-freshness.v1",
+      status: "unavailable",
+      checkedAt,
+      summary: "Git freshness is unavailable; project state cannot be compared to a repository snapshot.",
+      repo: { available: false },
+      dirty: { entries: 0, tracked: 0, untracked: 0, stateFiles: 0, sourceFiles: 0 },
+      changes: [],
+      refs: [],
+      nextAction: "Initialize or expose git metadata if repo-level freshness should gate handoff."
+    };
+  }
+  const root = runGit(projectDir, ["rev-parse", "--show-toplevel"]);
+  const branch = runGit(projectDir, ["branch", "--show-current"]) || "detached";
+  const fullHead = runGit(projectDir, ["rev-parse", "HEAD"]);
+  const shortHead = fullHead ? runGit(projectDir, ["rev-parse", "--short", "HEAD"]) : null;
+  const statusText = runGit(projectDir, ["status", "--porcelain=v1"]) || "";
+  const changes = statusText.split(/\r?\n/).map(parseGitStatusLine).filter(Boolean);
+  const tracked = changes.filter((item) => !item.untracked);
+  const untracked = changes.filter((item) => item.untracked);
+  const stateFiles = changes.filter((item) => item.stateFile);
+  const sourceFiles = changes.filter((item) => !item.stateFile);
+  const status = changes.length ? "dirty" : fullHead ? "clean" : "unborn";
+  return {
+    schemaVersion: "project-agent.git-freshness.v1",
+    status,
+    checkedAt,
+    summary:
+      status === "clean"
+        ? `Git tree is clean at ${shortHead || "HEAD"} on ${branch}.`
+        : status === "unborn"
+          ? `Git repository has no commit yet on ${branch}; handoff state has no commit anchor.`
+          : `Git tree has ${changes.length} change(s): ${tracked.length} tracked, ${untracked.length} untracked.`,
+    repo: {
+      available: true,
+      root,
+      branch,
+      head: shortHead,
+      fullHead,
+      hasHead: Boolean(fullHead)
+    },
+    dirty: {
+      entries: changes.length,
+      tracked: tracked.length,
+      untracked: untracked.length,
+      stateFiles: stateFiles.length,
+      sourceFiles: sourceFiles.length
+    },
+    changes: changes.slice(0, 12),
+    refs: [root ? ".git/HEAD" : null, ...changes.slice(0, 8).map((item) => item.path)].filter(Boolean),
+    nextAction:
+      status === "clean"
+        ? "Use this commit anchor with the state manifest before trusting handoff artifacts."
+        : status === "dirty"
+          ? "Review or commit/stash dirty source files before claiming a reproducible handoff snapshot."
+          : "Create an initial commit if handoff freshness must be tied to a git revision."
+  };
+}
+
+function buildFreshnessGate({ projectDir = "", processTrace = {}, architectureTrace = {}, handoffLifecycle = {}, handoffSnapshot = null, preEditRisk = {}, agentLeases = [], interruptedWork = {} }) {
   const ttls = {
     processCursor: 900,
     architectureScan: 1800,
     handoffSnapshot: handoffLifecycle?.ttlSeconds || 900,
-    preEditRisk: 900
+    preEditRisk: 900,
+    gitSnapshot: 300
   };
   const currentObservedAt = processTrace?.current?.at || processTrace?.events?.[0]?.at || null;
   const architectureObservedAt = architectureTrace?.scannedAt || architectureTrace?.changedFiles?.find((file) => file.modifiedAt)?.modifiedAt || null;
   const handoffObservedAt = handoffSnapshot?.updatedAt || handoffLifecycle?.acceptedAt || handoffLifecycle?.openedAt || null;
   const preEditObservedAt = currentObservedAt || architectureObservedAt || handoffObservedAt;
   const staleAgents = (agentLeases || []).filter((agent) => agent.effectiveStatus === "stale");
+  const gitFreshness = buildGitFreshness(projectDir || architectureTrace?.projectDir);
   const checks = [
     freshnessCheck(
       "process_cursor",
@@ -1071,6 +1170,15 @@ function buildFreshnessGate({ processTrace = {}, architectureTrace = {}, handoff
       [...staleAgents.map((agent) => agent.id), ...(interruptedWork?.items || []).flatMap((item) => [item.id, ...(item.refs || [])])],
       latestIso((agentLeases || []).map((agent) => agent.lastSeenAt || agent.createdAt)),
       ttls.processCursor
+    ),
+    freshnessCheck(
+      "git_snapshot",
+      "Git Snapshot",
+      gitFreshness.status === "clean" ? "ok" : "warn",
+      gitFreshness.summary,
+      gitFreshness.refs || [],
+      gitFreshness.checkedAt,
+      ttls.gitSnapshot
     )
   ];
   const bad = checks.filter((check) => check.status === "bad");
@@ -1105,6 +1213,7 @@ function buildFreshnessGate({ processTrace = {}, architectureTrace = {}, handoff
       ttlSeconds: ttls
     },
     checks,
+    git: gitFreshness,
     staleChecks: checks.filter((check) => ["bad", "warn"].includes(check.status)).map((check) => check.id),
     refs: [
       ".project-agent/agent-context-bundle.json",
@@ -3687,6 +3796,16 @@ function buildContinuityContract({
           summary: freshnessGate.summary,
           validity: freshnessGate.validity,
           staleChecks: freshnessGate.staleChecks,
+          git: freshnessGate.git
+            ? {
+                schemaVersion: freshnessGate.git.schemaVersion,
+                status: freshnessGate.git.status,
+                summary: freshnessGate.git.summary,
+                repo: freshnessGate.git.repo,
+                dirty: freshnessGate.git.dirty,
+                nextAction: freshnessGate.git.nextAction
+              }
+            : null,
           nextAction: freshnessGate.nextAction
         }
       : null,
@@ -3908,7 +4027,7 @@ function buildObjectiveCoverage({ goal, governanceSpec, memoryGraph, processTrac
   };
 }
 
-function buildContinuity({ summary, packet, currentStep, process, architecture, handoff, agentLeases = [], handoffSnapshot = null, knowledgeGraph = null }) {
+function buildContinuity({ projectDir = "", summary, packet, currentStep, process, architecture, handoff, agentLeases = [], handoffSnapshot = null, knowledgeGraph = null }) {
   const goal = summary.activeGoal;
   const kernelSummary = buildKernelSummary(packet);
   const changedFiles = latestUniqueChanges(architecture?.recentChanges, 12).map((item) => ({
@@ -3973,7 +4092,7 @@ function buildContinuity({ summary, packet, currentStep, process, architecture, 
   const developmentTrail = buildDevelopmentTrail({ processTrace, architectureTrace, changedFiles });
   const preEditRisk = buildPreEditRisk({ changedFiles, architectureTrace, developmentTrail, interruptedWork, takeoverReadiness, openTargets });
   const handoffLifecycle = buildHandoffLifecycle({ goal, handoff, handoffSnapshot, takeoverReadiness, interruptedWork, agentLeases, preEditRisk });
-  const freshnessGate = buildFreshnessGate({ processTrace, architectureTrace, handoffLifecycle, handoffSnapshot, preEditRisk, agentLeases, interruptedWork });
+  const freshnessGate = buildFreshnessGate({ projectDir: projectDir || architecture?.projectDir || "", processTrace, architectureTrace, handoffLifecycle, handoffSnapshot, preEditRisk, agentLeases, interruptedWork });
   const phaseLedger = buildPhaseLedger(processTrace);
   const runtimeEval = buildRuntimeEval({ processTrace, phaseLedger, developmentTrail, freshnessGate, preEditRisk, interruptedWork, openTargets, changedFiles });
   const checkpointLedger = buildCheckpointLedger({ processTrace, phaseLedger, runtimeEval, developmentTrail, preEditRisk, openTargets });
@@ -4147,6 +4266,7 @@ function buildContinuity({ summary, packet, currentStep, process, architecture, 
 }
 
 export async function buildInsights({
+  projectDir = "",
   rawState,
   summary,
   packet,
@@ -4281,6 +4401,7 @@ export async function buildInsights({
   const process = buildProcessTrail({ flow, runtimeEvents: visibleRuntimeEvents, hookIngresses, terminalSnapshot, architecture });
   const current = buildEventCurrentStep(buildCurrentStep({ summary, audit, handoff, terminalSnapshot }), process);
   const continuity = buildContinuity({
+    projectDir: projectDir || architecture?.projectDir || "",
     summary,
     packet,
     currentStep: current,
