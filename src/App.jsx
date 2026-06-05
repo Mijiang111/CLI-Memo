@@ -3111,6 +3111,7 @@ function RunContextSidecar({
   const stateBoundary = continuity?.stateBoundary || contextBundle?.validation?.stateBoundary || continuity?.continuityContract?.stateBoundary || null;
   const decisionLedger = continuity?.decisionLedger || contextBundle?.validation?.decisionLedger || continuity?.continuityContract?.decisionLedger || null;
   const temporalProvenance = continuity?.temporalProvenance || contextBundle?.validation?.temporalProvenance || continuity?.continuityContract?.temporalProvenance || null;
+  const codeGraph = continuity?.codeGraph || contextBundle?.architecture?.codeGraph || architectureMap?.codeGraph || continuity?.architectureTrace?.codeGraph || null;
   const attentionPack = contextBundle?.validation?.attentionPack || null;
   const freshnessGate = continuity?.freshnessGate || contextBundle?.validation?.freshnessGate || continuity?.continuityContract?.freshnessGate || null;
   const phaseLedger = continuity?.phaseLedger || contextBundle?.validation?.phaseLedger || continuity?.continuityContract?.phaseLedger || null;
