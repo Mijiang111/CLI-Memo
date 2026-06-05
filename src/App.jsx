@@ -180,6 +180,13 @@ function provenanceTone(status) {
   return "muted";
 }
 
+function boundaryTone(status) {
+  if (["separated", "ok"].includes(status)) return "ok";
+  if (["watch", "warn"].includes(status)) return "warn";
+  if (["blocked", "bad"].includes(status)) return "bad";
+  return "muted";
+}
+
 function decisionTone(status) {
   if (["traceable", "valid", "ok"].includes(status)) return "ok";
   if (["watch", "warn"].includes(status)) return "warn";
@@ -1332,6 +1339,59 @@ function ProvenanceLedgerPanel({ ledger }) {
   );
 }
 
+function StateBoundaryPanel({ boundary }) {
+  if (!boundary) return null;
+  const tone = boundaryTone(boundary.status);
+  const layers = boundary.layers || [];
+  const checks = boundary.checks || [];
+  const lineage = boundary.lineage || [];
+  const totals = boundary.totals || {};
+  return (
+    <section className="insight-section state-boundary" data-state-boundary=".project-agent/continuity.json#stateBoundary">
+      <div className="insight-heading">
+        <span>State Boundary</span>
+        <Pill tone={tone}>{boundary.status || "unknown"}</Pill>
+      </div>
+      <p>{boundary.summary || "No source/index/disclosure boundary audit available."}</p>
+      <div className="audit-counts">
+        <span className={tone}>layers {totals.layers || layers.length}</span>
+        <span className={totals.sourceRefs ? "ok" : "warn"}>sources {totals.sourceRefs || 0}</span>
+        <span className={totals.derivedIndexes ? "ok" : "warn"}>indexes {totals.derivedIndexes || 0}</span>
+        <span className={totals.disclosureOutputs ? "ok" : "warn"}>disclosures {totals.disclosureOutputs || 0}</span>
+      </div>
+      <div className="state-boundary-layers">
+        {layers.slice(0, 4).map((layer) => (
+          <div key={layer.id} className={`state-boundary-layer ${layer.sourceOfTruth ? "source" : layer.disclosure ? "disclosure" : "derived"}`}>
+            <span>{layer.sourceOfTruth ? "source" : layer.disclosure ? "disclosure" : "derived"}</span>
+            <strong title={layer.role}>{layer.label}</strong>
+            <small title={(layer.refs || []).join(", ")}>{(layer.refs || []).slice(0, 2).map(fileName).join(", ") || "no refs"}</small>
+          </div>
+        ))}
+      </div>
+      <div className="state-boundary-checks">
+        {checks.slice(0, 6).map((check) => (
+          <span key={check.id} className={check.status} title={check.detail}>
+            {check.status} {check.label}
+          </span>
+        ))}
+      </div>
+      {lineage.length ? (
+        <div className="state-boundary-lineage">
+          {lineage.slice(0, 4).map((item) => (
+            <span key={item.id} className={item.status || "ok"} title={(item.derivedFrom || []).join(", ")}>
+              {fileName(item.output)} from {(item.derivedFrom || []).slice(0, 2).map(fileName).join(", ")}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <div className="acceptance-source">
+        <span>next</span>
+        <code>{boundary.nextAction || "Verify source-of-truth refs before trusting derived indexes or prompts."}</code>
+      </div>
+    </section>
+  );
+}
+
 function DecisionLedgerPanel({ ledger }) {
   if (!ledger) return null;
   const tone = decisionTone(ledger.status);
@@ -1898,6 +1958,7 @@ function GovernanceKernelPanel({
   const stateManifest = contextBundle?.validation?.stateManifest || continuity?.stateManifest || null;
   const disclosureGate = contextBundle?.validation?.disclosureGate || null;
   const provenanceLedger = contextBundle?.validation?.provenanceLedger || null;
+  const stateBoundary = continuity?.stateBoundary || contextBundle?.validation?.stateBoundary || continuity?.continuityContract?.stateBoundary || null;
   const decisionLedger = continuity?.decisionLedger || contextBundle?.validation?.decisionLedger || continuity?.continuityContract?.decisionLedger || null;
   const codeGraph = continuity?.codeGraph || contextBundle?.architecture?.codeGraph || architectureMap?.codeGraph || continuity?.architectureTrace?.codeGraph || null;
   const attentionPack = contextBundle?.validation?.attentionPack || null;
@@ -1942,10 +2003,10 @@ function GovernanceKernelPanel({
     {
       id: "verify",
       label: "Verify",
-      metric: provenanceLedger?.coverage?.hashedCoverage ? `${provenanceLedger.coverage.hashedCoverage} hashes` : freshnessGate?.status ? `${freshnessGate.status} freshness` : stateManifest?.fileCount ? `${stateManifest.fileCount} source(s)` : governanceSpec?.score || "gate",
-      detail: provenanceLedger?.summary || freshnessGate?.summary || (stateManifest?.missing?.length ? `${stateManifest.missing.length} missing` : "manifest and audit proof"),
-      source: ".project-agent/state-manifest.json",
-      tone: provenanceLedger ? provenanceTone(provenanceLedger.status) : freshnessGate ? freshnessTone(freshnessGate.status) : stateManifest?.missing?.length ? "bad" : sourceFiles.length ? "ok" : "warn"
+      metric: stateBoundary?.totals ? `${stateBoundary.totals.sourceRefs || 0}/${stateBoundary.totals.derivedIndexes || 0} boundary` : provenanceLedger?.coverage?.hashedCoverage ? `${provenanceLedger.coverage.hashedCoverage} hashes` : freshnessGate?.status ? `${freshnessGate.status} freshness` : stateManifest?.fileCount ? `${stateManifest.fileCount} source(s)` : governanceSpec?.score || "gate",
+      detail: stateBoundary?.summary || provenanceLedger?.summary || freshnessGate?.summary || (stateManifest?.missing?.length ? `${stateManifest.missing.length} missing` : "manifest and audit proof"),
+      source: stateBoundary ? ".project-agent/continuity.json#stateBoundary" : ".project-agent/state-manifest.json",
+      tone: stateBoundary ? boundaryTone(stateBoundary.status) : provenanceLedger ? provenanceTone(provenanceLedger.status) : freshnessGate ? freshnessTone(freshnessGate.status) : stateManifest?.missing?.length ? "bad" : sourceFiles.length ? "ok" : "warn"
     },
     {
       id: "disclose",
@@ -2520,6 +2581,7 @@ function ContinuityPanel({ continuity }) {
   const contextBundleVerification = contextBundle?.validation?.agentContextBundleVerification;
   const disclosureGate = contextBundle?.validation?.disclosureGate;
   const provenanceLedger = contextBundle?.validation?.provenanceLedger;
+  const stateBoundary = continuity.stateBoundary || contextBundle?.validation?.stateBoundary || continuity.continuityContract?.stateBoundary;
   const decisionLedger = continuity.decisionLedger || contextBundle?.validation?.decisionLedger || continuity.continuityContract?.decisionLedger;
   const codeGraph = continuity.codeGraph || contextBundle?.architecture?.codeGraph || continuity.architectureMap?.codeGraph || continuity.architectureTrace?.codeGraph;
   const attentionPack = contextBundle?.validation?.attentionPack;
@@ -2594,6 +2656,7 @@ function ContinuityPanel({ continuity }) {
               ["lifecycle", contextBundle.handoff?.lifecycle?.status || handoffLifecycle?.status || "handoff lifecycle"],
               ["attention", attentionPack ? `${attentionPack.status} ${attentionPack.budget?.estimatedTokens || 0}/${attentionPack.budget?.budgetTokens || 0}` : "attention pack"],
               ["provenance", provenanceLedger ? `${provenanceLedger.status} ${provenanceLedger.coverage?.hashedCoverage || ""}` : "provenance ledger"],
+              ["boundary", stateBoundary ? `${stateBoundary.status} ${stateBoundary.totals?.derivedIndexes || 0} indexes` : "state boundary"],
               ["decisions", decisionLedger ? `${decisionLedger.status} ${decisionLedger.validCount || 0}/${decisionLedger.decisionCount || 0}` : "decision ledger"],
               ["freshness", freshnessGate ? `${freshnessGate.status} ${freshnessGate.validity?.validUntil || ""}` : "freshness gate"],
               ["ledger", phaseLedger ? `${phaseLedger.status} ${phaseLedger.linkedCount || 0}/${phaseLedger.spanCount || 0}` : "phase ledger"],
@@ -2617,6 +2680,7 @@ function ContinuityPanel({ continuity }) {
       ) : null}
       <HandoffLifecyclePanel lifecycle={contextBundle?.handoff?.lifecycle || handoffLifecycle} />
       <AttentionPackPanel pack={attentionPack} />
+      <StateBoundaryPanel boundary={stateBoundary} />
       <ProvenanceLedgerPanel ledger={provenanceLedger} />
       <DecisionLedgerPanel ledger={decisionLedger} />
       <CodeGraphPanel graph={codeGraph} />
@@ -2981,10 +3045,12 @@ function RunContextSidecar({
   const handoffLifecycle = continuity?.handoffLifecycle || contextBundle?.handoff?.lifecycle || continuity?.continuityContract?.handoffLifecycle || null;
   const disclosureGate = contextBundle?.validation?.disclosureGate || null;
   const provenanceLedger = contextBundle?.validation?.provenanceLedger || null;
+  const stateBoundary = continuity?.stateBoundary || contextBundle?.validation?.stateBoundary || continuity?.continuityContract?.stateBoundary || null;
   const decisionLedger = continuity?.decisionLedger || contextBundle?.validation?.decisionLedger || continuity?.continuityContract?.decisionLedger || null;
   const attentionPack = contextBundle?.validation?.attentionPack || null;
   const freshnessGate = continuity?.freshnessGate || contextBundle?.validation?.freshnessGate || continuity?.continuityContract?.freshnessGate || null;
   const phaseLedger = continuity?.phaseLedger || contextBundle?.validation?.phaseLedger || continuity?.continuityContract?.phaseLedger || null;
+  const checkpointLedger = continuity?.checkpointLedger || contextBundle?.validation?.checkpointLedger || continuity?.continuityContract?.checkpointLedger || null;
   const runtimeEval = continuity?.runtimeEval || contextBundle?.validation?.runtimeEval || continuity?.continuityContract?.runtimeEval || null;
   const hookIngressAudit = continuity?.hookIngressAudit || contextBundle?.validation?.hookIngressAudit || continuity?.continuityContract?.hookIngressAudit || null;
   const preEditRisk = continuity?.preEditRisk || contextBundle?.validation?.preEditRisk || null;
@@ -3101,6 +3167,13 @@ function RunContextSidecar({
           onClick={openHandoff}
         />
         <SidecarLine
+          title="Boundary"
+          value={stateBoundary?.status ? `${stateBoundary.status} state` : "State boundary"}
+          meta={stateBoundary?.nextAction || stateBoundary?.summary || "Source/index/disclosure split"}
+          tone={stateBoundary ? boundaryTone(stateBoundary.status) : "warn"}
+          onClick={openHandoff}
+        />
+        <SidecarLine
           title="Resume"
           value={handoffLifecycle?.status ? `Handoff ${handoffLifecycle.status}` : acceptanceReady ? "Another agent can continue" : "Needs a handoff check"}
           meta={handoffLifecycle?.nextAction || takeoverAcceptanceAudit?.score || continuity?.continuityAudit?.score || nextCommand}
@@ -3196,6 +3269,7 @@ function RunContextSidecar({
           <HandoffPrimerPanel continuity={continuity} contract={continuityContract} acceptanceAudit={takeoverAcceptanceAudit} />
           <HandoffLifecyclePanel lifecycle={handoffLifecycle} />
           <AttentionPackPanel pack={attentionPack} />
+          <StateBoundaryPanel boundary={stateBoundary} />
           <ProvenanceLedgerPanel ledger={provenanceLedger} />
           <DecisionLedgerPanel ledger={decisionLedger} />
           <CodeGraphPanel graph={codeGraph} />

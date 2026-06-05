@@ -409,7 +409,7 @@ Scores are relative to Project Agent Terminal's target, not to each project narr
 | --- | --- |
 | Axiom journal queue and top-of-mind note | `.project-agent/agent-context-bundle.json` plus bounded next-agent prompt |
 | RAVBYTE worklog, handoff, freshness validator | process trace, takeover packet, state manifest, acceptance audit |
-| Akita hook router, sanitizer, backpressure, typed handoff | sanitized hook ingress, 429 backpressure audit, and handoff state machine |
+| Akita hook router, sanitizer, backpressure, source/index split, typed handoff | sanitized hook ingress, 429 backpressure audit, state boundary audit, and handoff state machine |
 | Graphiti temporal fact edges | provenance-backed memory graph with validity windows |
 | RepoWise risk and decision intelligence | pre-edit risk panel and evidence-backed decisions |
 | CodeBoarding LSP call graph and linked diagram | architecture map with file/symbol refs |

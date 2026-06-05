@@ -3200,6 +3200,216 @@ function contractCapability(id, label, status, summary, refs = []) {
   };
 }
 
+function boundaryLayer(id, label, role, refs = [], options = {}) {
+  return {
+    id,
+    label,
+    role,
+    authority: options.authority || "project_agent",
+    sourceOfTruth: Boolean(options.sourceOfTruth),
+    derived: Boolean(options.derived),
+    disclosure: Boolean(options.disclosure),
+    mutable: options.mutable || "append_or_refresh",
+    refs: [...new Set((refs || []).filter(Boolean))].slice(0, 14),
+    derivedFrom: [...new Set((options.derivedFrom || []).filter(Boolean))].slice(0, 10),
+    writes: [...new Set((options.writes || []).filter(Boolean))].slice(0, 8)
+  };
+}
+
+function boundaryCheck(id, label, status, detail, refs = []) {
+  return {
+    id,
+    label,
+    status,
+    detail: compact(detail, 260),
+    refs: [...new Set((refs || []).filter(Boolean))].slice(0, 8)
+  };
+}
+
+function buildStateBoundary({ stateRefs = [], processTrace = {}, memoryGraph = {}, architectureTrace = {}, decisionLedger = {}, checkpointLedger = {}, phaseLedger = {}, runtimeEval = {}, hookIngressAudit = {} }) {
+  const hasRef = (ref) => stateRefs.includes(ref);
+  const layers = [
+    boundaryLayer(
+      "raw_events",
+      "Raw Events",
+      "Append-only runtime and hook events; these are the first record of agent/tool activity.",
+      [".project-agent/runtime.json", "/api/events", "/api/hooks"],
+      {
+        sourceOfTruth: true,
+        authority: "event_ingress",
+        mutable: "append_only",
+        writes: ["npm run event", "/api/events", "/api/hooks"]
+      }
+    ),
+    boundaryLayer(
+      "durable_sources",
+      "Durable Sources",
+      "Human/project-authored durable memory and governance docs that should outrank generated summaries.",
+      [".project-agent/state.json", "PROJECT.md", "AGENTS.md", "docs/architecture/principles.md", "docs/agents/roles.md"],
+      {
+        sourceOfTruth: true,
+        authority: "repo_files",
+        mutable: "human_or_agent_edit"
+      }
+    ),
+    boundaryLayer(
+      "derived_indexes",
+      "Derived Indexes",
+      "Generated query and navigation indexes that must point back to raw events or durable sources.",
+      [
+        ".project-agent/memory-graph.json",
+        ".project-agent/process-trace.json",
+        ".project-agent/development-trail.json",
+        ".project-agent/architecture-map.json",
+        ".project-agent/continuity.json#phaseLedger",
+        ".project-agent/continuity.json#checkpointLedger",
+        ".project-agent/continuity.json#decisionLedger",
+        ".project-agent/continuity.json#runtimeEval"
+      ],
+      {
+        derived: true,
+        authority: "generated_index",
+        derivedFrom: [".project-agent/runtime.json", ".project-agent/state.json", "PROJECT.md", "AGENTS.md"],
+        mutable: "regenerate"
+      }
+    ),
+    boundaryLayer(
+      "disclosure_outputs",
+      "Disclosure Outputs",
+      "Bounded handoff and prompt artifacts; useful for takeover but not the source of truth.",
+      [
+        ".project-agent/agent-context-bundle.json",
+        ".project-agent/takeover-packet.json",
+        ".project-agent/next-agent-prompt.md",
+        ".project-agent/context-starter-prompt.md",
+        ".project-agent/resume.md",
+        ".project-agent/recovery.md",
+        ".project-agent/continuity-audit.json",
+        ".project-agent/takeover-acceptance-audit.json"
+      ],
+      {
+        disclosure: true,
+        authority: "bounded_handoff",
+        derivedFrom: [".project-agent/continuity.json", ".project-agent/continuity-contract.json", ".project-agent/state-manifest.json"],
+        mutable: "refresh_before_handoff"
+      }
+    )
+  ];
+  const derivedLayer = layers.find((layer) => layer.id === "derived_indexes");
+  const disclosureLayer = layers.find((layer) => layer.id === "disclosure_outputs");
+  const sourceLayers = layers.filter((layer) => layer.sourceOfTruth);
+  const sourceRefs = sourceLayers.flatMap((layer) => layer.refs);
+  const derivedRefs = derivedLayer?.refs || [];
+  const disclosureRefs = disclosureLayer?.refs || [];
+  const checks = [
+    boundaryCheck(
+      "raw_events_declared",
+      "Raw Events Declared",
+      hasRef(".project-agent/runtime.json") && (processTrace?.eventCount || hookIngressAudit?.acceptedEvents || hookIngressAudit?.recentAttempts?.length) ? "ok" : "warn",
+      `${processTrace?.eventCount || 0} process event(s), ${hookIngressAudit?.acceptedEvents || 0} accepted hook event(s), ${(hookIngressAudit?.recentAttempts || []).length} ingress attempt(s).`,
+      [".project-agent/runtime.json", "/api/events", "/api/hooks"]
+    ),
+    boundaryCheck(
+      "durable_sources_declared",
+      "Durable Sources Declared",
+      hasRef(".project-agent/state.json") && hasRef("PROJECT.md") ? "ok" : "bad",
+      "Durable state and project docs are listed separately from generated indexes.",
+      [".project-agent/state.json", "PROJECT.md", "AGENTS.md"]
+    ),
+    boundaryCheck(
+      "derived_indexes_marked",
+      "Derived Indexes Marked",
+      memoryGraph?.schemaVersion && processTrace?.schemaVersion && architectureTrace?.schemaVersion ? "ok" : "warn",
+      `${derivedRefs.length} derived index ref(s) map back to raw events or durable sources.`,
+      derivedRefs
+    ),
+    boundaryCheck(
+      "disclosure_outputs_separate",
+      "Disclosure Outputs Separate",
+      disclosureRefs.every((ref) => !sourceRefs.includes(ref)) ? "ok" : "bad",
+      `${disclosureRefs.length} handoff/prompt artifact(s) are marked as disclosure outputs, not source-of-truth files.`,
+      disclosureRefs
+    ),
+    boundaryCheck(
+      "lineage_links_present",
+      "Lineage Links Present",
+      derivedLayer?.derivedFrom?.length && disclosureLayer?.derivedFrom?.length ? "ok" : "bad",
+      "Derived indexes and disclosure outputs declare upstream raw/durable sources.",
+      [...(derivedLayer?.derivedFrom || []), ...(disclosureLayer?.derivedFrom || [])]
+    ),
+    boundaryCheck(
+      "prompt_not_authority",
+      "Prompt Not Authority",
+      disclosureRefs.includes(".project-agent/next-agent-prompt.md") && !sourceRefs.includes(".project-agent/next-agent-prompt.md") ? "ok" : "bad",
+      "Starter prompts and resume briefs are bounded disclosures; agents must verify source refs before trusting them.",
+      [".project-agent/next-agent-prompt.md", ".project-agent/agent-context-bundle.json"]
+    )
+  ];
+  const blockers = checks.filter((check) => check.status === "bad").map((check) => check.id);
+  const warnings = checks.filter((check) => check.status === "warn").map((check) => check.id);
+  const status = blockers.length ? "blocked" : warnings.length ? "watch" : "separated";
+  const lineage = [
+    {
+      id: "events_to_process",
+      output: ".project-agent/process-trace.json",
+      kind: "derived_index",
+      derivedFrom: [".project-agent/runtime.json", "/api/events", "/api/hooks"],
+      status: processTrace?.current ? "ok" : "warn"
+    },
+    {
+      id: "sources_to_memory",
+      output: ".project-agent/memory-graph.json",
+      kind: "derived_index",
+      derivedFrom: [".project-agent/state.json", ".project-agent/runtime.json", "PROJECT.md"],
+      status: memoryGraph?.nodeCount || memoryGraph?.nodes?.length ? "ok" : "warn"
+    },
+    {
+      id: "files_to_architecture",
+      output: ".project-agent/architecture-map.json",
+      kind: "derived_index",
+      derivedFrom: ["PROJECT.md", "AGENTS.md", "src/**", "server/**", "docs/**"],
+      status: architectureTrace?.totals?.files ? "ok" : "warn"
+    },
+    {
+      id: "bundle_to_prompt",
+      output: ".project-agent/next-agent-prompt.md",
+      kind: "disclosure_output",
+      derivedFrom: [".project-agent/agent-context-bundle.json", ".project-agent/continuity-contract.json"],
+      status: "ok"
+    }
+  ];
+  return {
+    schemaVersion: "project-agent.state-boundary-audit.v1",
+    status,
+    summary:
+      status === "separated"
+        ? "State boundaries are explicit: raw events and durable sources are separated from derived indexes and disclosure outputs."
+        : status === "watch"
+          ? `State boundary is usable with ${warnings.length} warning(s); verify lineage before trusting generated indexes.`
+          : `State boundary is blocked by ${blockers.length} failed separation check(s).`,
+    layers,
+    checks,
+    lineage,
+    totals: {
+      layers: layers.length,
+      sourceRefs: [...new Set(sourceRefs)].length,
+      derivedIndexes: derivedRefs.length,
+      disclosureOutputs: disclosureRefs.length,
+      lineageLinks: lineage.length
+    },
+    sourceOfTruthRefs: [...new Set(sourceRefs)].slice(0, 14),
+    derivedIndexRefs: derivedRefs,
+    disclosureOutputRefs: disclosureRefs,
+    warnings,
+    blockers,
+    refs: [".project-agent/continuity.json#stateBoundary", ".project-agent/continuity-contract.json", ".project-agent/agent-context-bundle.json", "docs/research/agent-governance-landscape.md"],
+    nextAction:
+      status === "separated"
+        ? "Use raw_events and durable_sources for authority; treat derived_indexes and disclosure_outputs as navigational aids."
+        : "Repair bad boundary checks before trusting generated handoff or index artifacts."
+  };
+}
+
 function buildContinuityContract({
   project,
   role,
@@ -3224,7 +3434,8 @@ function buildContinuityContract({
   decisionLedger,
   checkpointLedger,
   runtimeEval,
-  hookIngressAudit
+  hookIngressAudit,
+  stateBoundary
 }) {
   const domains = governance?.domains || [];
   const badDomains = domains.filter((domain) => domain.status === "bad");
@@ -3309,6 +3520,13 @@ function buildContinuityContract({
       hookIngressAudit?.status === "clean" ? "ok" : hookIngressAudit?.status === "watch" ? "warn" : "warn",
       hookIngressAudit?.summary || "No hook ingress audit is available.",
       hookIngressAudit?.refs || ["/api/hooks", "/api/events", ".project-agent/runtime.json"]
+    ),
+    contractCapability(
+      "state_boundary",
+      "State Boundary",
+      stateBoundary?.status === "separated" ? "ok" : stateBoundary?.status === "blocked" ? "bad" : "warn",
+      stateBoundary?.summary || "No source/index/disclosure boundary audit is available.",
+      stateBoundary?.refs || [".project-agent/continuity.json#stateBoundary", ".project-agent/agent-context-bundle.json"]
     )
   ];
   const core = {
@@ -3379,6 +3597,7 @@ function buildContinuityContract({
       phaseLedger: ".project-agent/continuity.json#phaseLedger",
       checkpointLedger: ".project-agent/continuity.json#checkpointLedger",
       decisionLedger: ".project-agent/continuity.json#decisionLedger",
+      stateBoundary: ".project-agent/continuity.json#stateBoundary",
       architectureMap: ".project-agent/architecture-map.json",
       codeGraph: ".project-agent/architecture-map.json#codeGraph",
       stateManifest: ".project-agent/state-manifest.json",
@@ -3539,6 +3758,20 @@ function buildContinuityContract({
           nextAction: hookIngressAudit.nextAction
         }
       : null,
+    stateBoundary: stateBoundary
+      ? {
+          schemaVersion: stateBoundary.schemaVersion,
+          status: stateBoundary.status,
+          summary: stateBoundary.summary,
+          totals: stateBoundary.totals,
+          sourceOfTruthRefs: stateBoundary.sourceOfTruthRefs,
+          derivedIndexRefs: stateBoundary.derivedIndexRefs,
+          disclosureOutputRefs: stateBoundary.disclosureOutputRefs,
+          warnings: stateBoundary.warnings,
+          blockers: stateBoundary.blockers,
+          nextAction: stateBoundary.nextAction
+        }
+      : null,
     proofChecklist: [
       {
         id: "contract_read",
@@ -3569,10 +3802,15 @@ function buildContinuityContract({
         id: "handoff_refresh",
         statement: "Refresh resume/recovery or trigger handoff snapshot before stopping.",
         refs: [".project-agent/resume.md", ".project-agent/recovery.md"]
+      },
+      {
+        id: "state_boundary",
+        statement: "Treat raw events and durable sources as authority; treat indexes and prompts as derived/disclosure.",
+        refs: [".project-agent/continuity.json#stateBoundary", ".project-agent/runtime.json", ".project-agent/state.json"]
       }
     ],
     handoffRules: governance?.operatingContract || [],
-    stateRefs: [...new Set([".project-agent/agent-context-bundle.json", ".project-agent/governance-spec.json", ".project-agent/continuity-contract.json", ".project-agent/agent-runbook.json", ".project-agent/memory-graph.json", ".project-agent/process-trace.json", ".project-agent/architecture-map.json", ".project-agent/state-manifest.json", ".project-agent/takeover-packet.json", ".project-agent/continuity-audit.json", ".project-agent/next-agent-prompt.md", ...(stateRefs || [])])]
+    stateRefs: [...new Set([".project-agent/agent-context-bundle.json", ".project-agent/governance-spec.json", ".project-agent/continuity-contract.json", ".project-agent/agent-runbook.json", ".project-agent/memory-graph.json", ".project-agent/process-trace.json", ".project-agent/architecture-map.json", ".project-agent/state-manifest.json", ".project-agent/takeover-packet.json", ".project-agent/continuity-audit.json", ".project-agent/next-agent-prompt.md", ".project-agent/continuity.json#stateBoundary", ...(stateRefs || [])])]
   };
 }
 
@@ -3704,6 +3942,7 @@ function buildContinuity({ summary, packet, currentStep, process, architecture, 
     ".project-agent/takeover-acceptance-audit.json",
     ".project-agent/next-agent-prompt.md",
     ".project-agent/continuity.json",
+    ".project-agent/continuity.json#stateBoundary",
     ".project-agent/resume.md",
     ".project-agent/recovery.md",
     ".project-agent/state.json",
@@ -3768,6 +4007,17 @@ function buildContinuity({ summary, packet, currentStep, process, architecture, 
     stateRefs
   });
   const decisionLedger = buildDecisionLedger({ summary, governance, processTrace, architectureTrace, changedFiles, stateRefs });
+  const stateBoundary = buildStateBoundary({
+    stateRefs,
+    processTrace,
+    memoryGraph,
+    architectureTrace,
+    decisionLedger,
+    checkpointLedger,
+    phaseLedger,
+    runtimeEval,
+    hookIngressAudit
+  });
   const continuityContract = buildContinuityContract({
     project: summary.project,
     role: packet?.role,
@@ -3792,7 +4042,8 @@ function buildContinuity({ summary, packet, currentStep, process, architecture, 
     decisionLedger,
     checkpointLedger,
     runtimeEval,
-    hookIngressAudit
+    hookIngressAudit,
+    stateBoundary
   });
   const governanceSpec = buildGovernanceSpec({
     goal,
@@ -3847,6 +4098,7 @@ function buildContinuity({ summary, packet, currentStep, process, architecture, 
     phaseLedger,
     checkpointLedger,
     decisionLedger,
+    stateBoundary,
     runtimeEval,
     hookIngressAudit,
     architectureMap,
@@ -3877,6 +4129,7 @@ function buildContinuity({ summary, packet, currentStep, process, architecture, 
       "Inspect phaseLedger before replaying tool work; linked means parent/child spans and run groups are available, flat means record parentId/runId first.",
       "Inspect checkpointLedger before resuming or retrying work; it lists resumable checkpoints, pending writes, failed gates, and artifact refs.",
       "Inspect decisionLedger before trusting project rules or product strategy; watch/invalid decisions must be rechecked against source refs.",
+      "Inspect stateBoundary before trusting generated indexes or prompts; raw events and durable sources outrank derived/disclosure artifacts.",
       "Inspect runtimeEval before claiming completion; it scores spans, phase coverage, provenance, evidence, and active errors.",
       "Inspect hookIngressAudit before trusting external hook events; it records sanitized ingress, type normalization, and redactions.",
       "Inspect processTrace.inspectOrder before editing; it lists the event order and file refs a new agent should review.",

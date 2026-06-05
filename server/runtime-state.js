@@ -503,6 +503,7 @@ function buildAttentionPack(bundle = {}, options = {}) {
   const decisionLedger = bundle.validation?.decisionLedger || {};
   const provenance = bundle.validation?.provenanceLedger || {};
   const hookIngressAudit = bundle.validation?.hookIngressAudit || {};
+  const stateBoundary = bundle.validation?.stateBoundary || {};
   const preEditRisk = bundle.validation?.preEditRisk || {};
   const codeGraph = bundle.architecture?.codeGraph || bundle.architecture?.map?.codeGraph || bundle.architecture?.trace?.codeGraph || {};
   const objectiveCoverage = bundle.validation?.objectiveCoverage || {};
@@ -620,6 +621,15 @@ function buildAttentionPack(bundle = {}, options = {}) {
       `${hookIngressAudit.status || "unknown"} hook ingress, accepted ${hookIngressAudit.acceptedEvents || 0}. ${hookIngressAudit.summary || "No hook ingress audit is embedded."}`,
       hookIngressAudit.refs || ["/api/hooks", "/api/events", ".project-agent/runtime.json"],
       { action: hookIngressAudit.nextAction || "Use sanitized hook ingress for external agent/tool events." }
+    ),
+    attentionItem(
+      "state_boundary",
+      "provenance",
+      stateBoundary.status === "blocked" ? 93 : stateBoundary.status === "watch" ? 88 : 82,
+      "State Boundary",
+      `${stateBoundary.status || "unknown"} state boundary, ${stateBoundary.totals?.sourceRefs || 0} source ref(s), ${stateBoundary.totals?.derivedIndexes || 0} derived index(es), ${stateBoundary.totals?.disclosureOutputs || 0} disclosure output(s). ${stateBoundary.summary || "No source/index/disclosure boundary audit is embedded."}`,
+      stateBoundary.refs || [".project-agent/continuity.json#stateBoundary", ".project-agent/agent-context-bundle.json"],
+      { action: stateBoundary.nextAction || "Use raw events and durable sources as authority before trusting generated indexes or prompts." }
     ),
     attentionItem(
       "provenance_ledger",
@@ -799,6 +809,7 @@ function buildProvenanceLedger(bundle = {}) {
   const checkpointLedger = bundle.validation?.checkpointLedger || {};
   const decisionLedger = bundle.validation?.decisionLedger || {};
   const hookIngressAudit = bundle.validation?.hookIngressAudit || {};
+  const stateBoundary = bundle.validation?.stateBoundary || {};
   const preEditRisk = bundle.validation?.preEditRisk || {};
   const codeGraph = bundle.architecture?.codeGraph || bundle.architecture?.map?.codeGraph || bundle.architecture?.trace?.codeGraph || {};
   const lifecycle = bundle.handoff?.lifecycle || {};
@@ -897,6 +908,13 @@ function buildProvenanceLedger(bundle = {}) {
       hookIngressAudit.summary || "No hook ingress audit summary.",
       hookIngressAudit.refs || ["/api/hooks", "/api/events", ".project-agent/runtime.json"],
       { observedAt: hookIngressAudit.latestAt || null }
+    ),
+    provenanceClaim(
+      "state_boundary",
+      "State Boundary",
+      stateBoundary.status === "blocked" ? "warn" : stateBoundary.status ? "ok" : "warn",
+      stateBoundary.summary || "No source/index/disclosure boundary summary.",
+      stateBoundary.refs || [".project-agent/continuity.json#stateBoundary", ".project-agent/continuity-contract.json", ".project-agent/agent-context-bundle.json"]
     ),
     provenanceClaim(
       "pre_edit_risk",
@@ -1101,6 +1119,7 @@ export function buildAgentContextBundle(projectDir, continuity = readContinuity(
       phaseLedger: continuity.phaseLedger || continuity.continuityContract?.phaseLedger || null,
       checkpointLedger: continuity.checkpointLedger || continuity.continuityContract?.checkpointLedger || null,
       decisionLedger: continuity.decisionLedger || continuity.continuityContract?.decisionLedger || null,
+      stateBoundary: continuity.stateBoundary || continuity.continuityContract?.stateBoundary || null,
       runtimeEval: continuity.runtimeEval || continuity.continuityContract?.runtimeEval || null,
       hookIngressAudit: continuity.hookIngressAudit || continuity.continuityContract?.hookIngressAudit || null,
       objectiveCoverage: continuity.objectiveCoverage || null,
@@ -1240,6 +1259,14 @@ export function verifyAgentContextBundle(projectDir, bundle = readAgentContextBu
     : decisionLedger.status === "blocked" || decisionLedger.blockers?.length
       ? "warn"
       : "ok";
+  const stateBoundary = bundle.validation?.stateBoundary || null;
+  const stateBoundaryStatus = !stateBoundary || stateBoundary.schemaVersion !== "project-agent.state-boundary-audit.v1"
+    ? "warn"
+    : stateBoundary.status === "blocked"
+      ? "bad"
+      : stateBoundary.status === "watch"
+        ? "warn"
+        : "ok";
   const codeGraph = bundle.architecture?.codeGraph || bundle.architecture?.map?.codeGraph || bundle.architecture?.trace?.codeGraph || null;
   const codeGraphStatus = !codeGraph || codeGraph.schemaVersion !== "project-agent.code-graph.v1"
     ? "warn"
@@ -1415,6 +1442,13 @@ export function verifyAgentContextBundle(projectDir, bundle = readAgentContextBu
       decisionLedgerStatus,
       decisionLedger?.summary || "No temporal decision ledger is embedded.",
       decisionLedger?.refs || [".project-agent/state.json", ".project-agent/governance-spec.json", "docs/research/agent-governance-landscape.md"]
+    ),
+    bundleCheck(
+      "state_boundary",
+      "State Boundary",
+      stateBoundaryStatus,
+      stateBoundary?.summary || "No source/index/disclosure boundary audit is embedded.",
+      stateBoundary?.refs || [".project-agent/continuity.json#stateBoundary", ".project-agent/agent-context-bundle.json"]
     ),
     bundleCheck(
       "hook_ingress",

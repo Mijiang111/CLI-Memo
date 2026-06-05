@@ -35,6 +35,7 @@ function renderPrompt({ continuity }) {
   const phaseLedger = continuity.phaseLedger || continuity.agentContextBundle?.validation?.phaseLedger || continuity.continuityContract?.phaseLedger || {};
   const checkpointLedger = continuity.checkpointLedger || continuity.agentContextBundle?.validation?.checkpointLedger || continuity.continuityContract?.checkpointLedger || {};
   const decisionLedger = continuity.decisionLedger || continuity.agentContextBundle?.validation?.decisionLedger || continuity.continuityContract?.decisionLedger || {};
+  const stateBoundary = continuity.stateBoundary || continuity.agentContextBundle?.validation?.stateBoundary || continuity.continuityContract?.stateBoundary || {};
   const codeGraph = continuity.codeGraph || continuity.architectureTrace?.codeGraph || continuity.architectureMap?.codeGraph || continuity.agentContextBundle?.architecture?.codeGraph || {};
   const hookIngressAudit = continuity.hookIngressAudit || continuity.agentContextBundle?.validation?.hookIngressAudit || continuity.continuityContract?.hookIngressAudit || {};
   const provenanceLedger = continuity.agentContextBundle?.validation?.provenanceLedger || {};
@@ -144,6 +145,17 @@ function renderPrompt({ continuity }) {
     `- summary: ${hookIngressAudit.summary || "No sanitized hook ingress audit is embedded."}`,
     `- next action: ${hookIngressAudit.nextAction || "Use /api/hooks or npm run event for external tool events."}`,
     "",
+    "## State Boundary",
+    "",
+    `- status: ${stateBoundary.status || "unknown"}`,
+    `- source refs: ${stateBoundary.totals?.sourceRefs || 0}`,
+    `- derived indexes: ${stateBoundary.totals?.derivedIndexes || 0}`,
+    `- disclosure outputs: ${stateBoundary.totals?.disclosureOutputs || 0}`,
+    `- summary: ${stateBoundary.summary || "No source/index/disclosure boundary audit is embedded."}`,
+    `- next action: ${stateBoundary.nextAction || "Treat raw events and durable sources as authority; treat indexes and prompts as derived."}`,
+    "Boundary checks:",
+    listLines((stateBoundary.checks || []).slice(0, 6), (item) => `- [${item.status}] ${item.id || item.label}: ${item.detail || item.label}${item.refs?.length ? `\n   - refs: ${item.refs.slice(0, 3).join(", ")}` : ""}`),
+    "",
     "## Provenance Ledger",
     "",
     `- status: ${provenanceLedger.status || "unknown"}`,
@@ -215,7 +227,7 @@ function renderPrompt({ continuity }) {
     "",
     "## Operating Rule",
     "",
-    "Before the next tool call, read attentionPack, check disclosureGate.packing, freshnessGate, phaseLedger, checkpointLedger, decisionLedger, codeGraph, runtimeEval, hookIngressAudit, and provenanceLedger, then record a fresh `current` event. After the tool call, record `done`, `failed`, or `blocked` with parentId/runId when it belongs to the same operation. Refresh resume/recovery before handing off again.",
+    "Before the next tool call, read attentionPack, check disclosureGate.packing, freshnessGate, phaseLedger, checkpointLedger, decisionLedger, stateBoundary, codeGraph, runtimeEval, hookIngressAudit, and provenanceLedger, then record a fresh `current` event. After the tool call, record `done`, `failed`, or `blocked` with parentId/runId when it belongs to the same operation. Refresh resume/recovery before handing off again.",
     ""
   ]
     .filter((line) => line !== undefined && line !== null)

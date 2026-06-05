@@ -29,6 +29,7 @@ The app is designed for trusted local use. It runs commands in the selected proj
 - Writes `.project-agent/development-trail.json` with process steps linked to touched files, impacted folders, takeover risk, and inspect order.
 - Writes `.project-agent/architecture-map.json` with the durable project tree, file changes, and inspect order.
 - Writes `.project-agent/state-manifest.json` with hashes for the handoff files.
+- Embeds a State Boundary Audit that separates raw events, durable sources, derived indexes, and disclosure outputs.
 - Writes `.project-agent/takeover-packet.json` as a concise next-agent startup index.
 - Writes `.project-agent/continuity-audit.json` as a machine-readable takeover proof checklist.
 - Writes `.project-agent/takeover-acceptance-audit.json` as a user-objective acceptance audit for visible memory, dynamic process, managed architecture, and crash-proof handoff.

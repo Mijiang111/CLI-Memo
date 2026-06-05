@@ -34,6 +34,7 @@ export function renderAgentContextPrompt(bundle, verification = verifyAgentConte
   const phaseLedger = bundle?.validation?.phaseLedger || {};
   const checkpointLedger = bundle?.validation?.checkpointLedger || {};
   const decisionLedger = bundle?.validation?.decisionLedger || {};
+  const stateBoundary = bundle?.validation?.stateBoundary || {};
   const codeGraph = bundle?.architecture?.codeGraph || bundle?.architecture?.map?.codeGraph || bundle?.architecture?.trace?.codeGraph || {};
   const hookIngressAudit = bundle?.validation?.hookIngressAudit || {};
   const provenanceLedger = bundle?.validation?.provenanceLedger || {};
@@ -122,6 +123,17 @@ export function renderAgentContextPrompt(bundle, verification = verifyAgentConte
     `- unknown types: ${hookIngressAudit.unknownTypeEvents || 0}`,
     `- summary: ${hookIngressAudit.summary || "No sanitized hook ingress audit is embedded."}`,
     `- next action: ${hookIngressAudit.nextAction || "Use /api/hooks or npm run event for external tool events."}`,
+    "",
+    "## State Boundary",
+    "",
+    `- status: ${stateBoundary.status || "unknown"}`,
+    `- source refs: ${stateBoundary.totals?.sourceRefs || 0}`,
+    `- derived indexes: ${stateBoundary.totals?.derivedIndexes || 0}`,
+    `- disclosure outputs: ${stateBoundary.totals?.disclosureOutputs || 0}`,
+    `- summary: ${stateBoundary.summary || "No source/index/disclosure boundary audit is embedded."}`,
+    `- next action: ${stateBoundary.nextAction || "Treat raw events and durable sources as authority; treat indexes and prompts as derived."}`,
+    "Boundary checks:",
+    listLines((stateBoundary.checks || []).slice(0, 6), (item) => `- [${item.status}] ${item.id || item.label}: ${item.detail || item.label}${item.refs?.length ? ` refs=${item.refs.slice(0, 3).join(", ")}` : ""}`),
     "",
     "## Provenance Ledger",
     "",
@@ -217,10 +229,11 @@ export function renderAgentContextPrompt(bundle, verification = verifyAgentConte
     "8. Inspect decisionLedger; re-check watch/invalid decisions against their source refs before relying on project rules.",
     "9. Inspect codeGraph; if changedImpact has dependents, read those files before editing imported modules.",
     "10. Inspect hookIngressAudit; trust external hook events only after checking redactions and type normalization.",
-    "11. Inspect provenanceLedger; use sourceRefs and hashes before trusting remembered facts.",
-    "12. Resume from the current cursor below, not from memory of the previous chat.",
-    "13. Record a fresh `current` event before the next tool call, then record `done`, `failed`, or `blocked` afterward.",
-    "14. Inspect changed files, impacted folders, and dependency impact before modifying code.",
+    "11. Inspect stateBoundary; use raw events and durable sources as authority, and treat derived indexes/prompts as navigational aids.",
+    "12. Inspect provenanceLedger; use sourceRefs and hashes before trusting remembered facts.",
+    "13. Resume from the current cursor below, not from memory of the previous chat.",
+    "14. Record a fresh `current` event before the next tool call, then record `done`, `failed`, or `blocked` afterward.",
+    "15. Inspect changed files, impacted folders, and dependency impact before modifying code.",
     "",
     "## Current Cursor",
     "",

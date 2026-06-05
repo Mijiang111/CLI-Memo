@@ -4,6 +4,8 @@
 本地提交：`69044ef chore: snapshot project agent terminal`  
 当前状态：已完成本地 git snapshot；远端 `origin` 尚未配置，暂不能 push 到 GitHub。
 
+更新：State Boundary Audit 已进入实现链路，覆盖 continuity、continuity contract、agent context bundle validation、provenance ledger、attention pack、starter prompts、Handoff UI 和 smoke tests。它把 raw events、durable sources、derived indexes、disclosure outputs 明确分层，避免把 prompt/resume/graph index 误当成唯一真相。
+
 ## 一、产品定位
 
 Project Agent Terminal 的方向已经从“本地 terminal wrapper”推进到“AI-native 项目治理工作台”：
@@ -133,7 +135,7 @@ git push -u origin main
 
 ## 七、下一轮建议
 
-下一轮最值得继续产品化的是 **State Boundary Audit**：
+已产品化的下一项能力是 **State Boundary Audit**：
 
 - 明确 raw events、durable sources、derived indexes、disclosure outputs 四层。
 - 在 continuity contract 里标出哪些文件是 source-of-truth，哪些只是 derived index。
