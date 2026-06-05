@@ -2,7 +2,11 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import pty from "node-pty";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const pythonPtyBridge = path.join(__dirname, "python-pty-bridge.py");
 
 function cleanCommand(command) {
   return command
@@ -47,6 +51,7 @@ export class TerminalSession {
     this.startedAt = null;
     this.pty = null;
     this.pipe = null;
+    this.pipeMode = "";
     this.backend = "stopped";
     this.backendReason = "";
     this.onEvent = onEvent;
@@ -55,7 +60,10 @@ export class TerminalSession {
   start() {
     if (this.pty || this.pipe) return;
     const ptyError = this.startPty();
-    if (ptyError) this.startPipe(ptyError);
+    if (ptyError) {
+      const bridgeError = this.startPythonPty(ptyError);
+      if (bridgeError) this.startPipe(bridgeError);
+    }
   }
 
   env() {
@@ -103,6 +111,7 @@ export class TerminalSession {
     const reason = ptyError?.message || String(ptyError || "PTY unavailable");
     this.backend = "pipe";
     this.backendReason = reason;
+    this.pipeMode = "shell";
     this.pipe = spawn(this.shell, pipeShellArgs(this.shell), {
       cwd: this.projectDir,
       env: this.env(),
@@ -122,12 +131,66 @@ export class TerminalSession {
       this.backendReason = error.message || String(error);
       this.broadcast({ type: "terminal-error", message: this.backendReason });
       this.pipe = null;
+      this.pipeMode = "";
     });
     this.pipe.on("exit", (exitCode, signal) => {
       this.broadcast({ type: "exit", exitCode, signal });
       this.pipe = null;
+      this.pipeMode = "";
       this.backend = "stopped";
     });
+  }
+
+  startPythonPty(ptyError) {
+    if (!existsSync(pythonPtyBridge)) return ptyError || new Error("Python PTY bridge is missing.");
+    const reason = ptyError?.message || String(ptyError || "node-pty unavailable");
+    this.backend = "python-pty";
+    this.backendReason = `node-pty unavailable: ${reason}`;
+    this.pipeMode = "python-pty";
+    try {
+      this.pipe = spawn("python3", [
+        pythonPtyBridge,
+        "--shell",
+        this.shell,
+        "--cwd",
+        this.projectDir,
+        "--cols",
+        String(this.cols),
+        "--rows",
+        String(this.rows)
+      ], {
+        cwd: this.projectDir,
+        env: this.env(),
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+    } catch (error) {
+      this.pipe = null;
+      this.pipeMode = "";
+      return error;
+    }
+    this.broadcast({ type: "terminal-mode", backend: this.backend, reason: this.backendReason, shell: path.basename(this.shell) });
+    this.broadcast({
+      type: "output",
+      data:
+        `\r\n[Project Agent Terminal] node-pty unavailable (${reason}).\r\n` +
+        "[Project Agent Terminal] Running Python PTY bridge: interactive CLI agents receive a real TTY.\r\n"
+    });
+    this.pipe.stdout.on("data", (data) => this.handleOutput(data.toString()));
+    this.pipe.stderr.on("data", (data) => this.handleOutput(data.toString()));
+    this.pipe.on("error", (error) => {
+      this.backend = "failed";
+      this.backendReason = error.message || String(error);
+      this.broadcast({ type: "terminal-error", message: this.backendReason });
+      this.pipe = null;
+      this.pipeMode = "";
+    });
+    this.pipe.on("exit", (exitCode, signal) => {
+      this.broadcast({ type: "exit", exitCode, signal });
+      this.pipe = null;
+      this.pipeMode = "";
+      this.backend = "stopped";
+    });
+    return null;
   }
 
   handleOutput(data) {
@@ -174,6 +237,10 @@ export class TerminalSession {
       return;
     }
     if (!this.pipe || !this.pipe.stdin.writable) return;
+    if (this.pipeMode === "python-pty") {
+      this.pipe.stdin.write(data);
+      return;
+    }
     if (data.includes("\x03")) {
       this.echoPipeInput(data);
       this.pipe.kill("SIGINT");

@@ -70,7 +70,7 @@ export function runAgentContextDrill(projectDir, options = {}) {
     check(
       "read_order",
       "Read Order",
-      bundle?.readOrder?.[0] === ".project-agent/agent-context-bundle.json" ? "ok" : "bad",
+      bundle?.readOrder?.[0] === ".project-agent/takeover-summary.json" ? "ok" : "bad",
       bundle?.readOrder?.length ? `${bundle.readOrder.length} read-order item(s).` : "No read order in bundle.",
       bundle?.readOrder || []
     )
@@ -83,7 +83,7 @@ export function runAgentContextDrill(projectDir, options = {}) {
       refs: [".project-agent/agent-context-bundle.json"]
     },
     {
-      action: "Read the bundle-only starter prompt.",
+      action: "Read the summary-first starter prompt.",
       command: "cat .project-agent/context-starter-prompt.md",
       refs: [".project-agent/context-starter-prompt.md"]
     },
@@ -96,7 +96,7 @@ export function runAgentContextDrill(projectDir, options = {}) {
       : []),
     {
       action: "Inspect changed files and architecture impact.",
-      command: "cat .project-agent/agent-context-bundle.json",
+      command: "jq '{currentState,nextStep,risks,budgets,sourceRefs}' .project-agent/takeover-summary.json",
       refs: changedFiles.slice(0, 8).map((file) => file.path)
     },
     {

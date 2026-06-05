@@ -17,9 +17,10 @@ The app is designed for trusted local use. It runs commands in the selected proj
 - Shows the AI process cursor: previous event, current event, and next expected step.
 - Scans the project architecture tree and highlights recently added, modified, or deleted files.
 - Writes `.project-agent/continuity.json` so another agent can resume after a crash.
-- Writes `.project-agent/agent-context-bundle.json` as the single-file takeover index for memory, process, architecture, governance, and validation.
-- Writes `.project-agent/context-starter-prompt.md` as the bundle-only starter prompt for cold-start agent takeover.
-- Writes `.project-agent/context-takeover-drill.json` as the bundle-only cold-start takeover rehearsal.
+- Writes `.project-agent/takeover-summary.json` as the small default takeover packet for cold-start agent handoff.
+- Writes `.project-agent/agent-context-bundle.json` as a budgeted takeover index for memory, process, architecture, governance, and validation.
+- Writes `.project-agent/context-starter-prompt.md` as the summary-first starter prompt for cold-start agent takeover.
+- Writes `.project-agent/context-takeover-drill.json` as the summary-first cold-start takeover rehearsal.
 - Embeds objective coverage in continuity and the bundle so visible memory, dynamic process, managed architecture, and agent-neutral handoff each map to evidence and next actions.
 - Writes `.project-agent/governance-spec.json` as the product-level AI-native development contract.
 - Writes `.project-agent/continuity-contract.json` as the agent-neutral takeover contract.
@@ -51,30 +52,33 @@ The right panel is intentionally not a dump of every field. It has five operatio
 
 Every project initialized by the CLI gets an `AGENTS.md` continuity protocol. A replacement agent should read files in this order:
 
-1. `.project-agent/agent-context-bundle.json`
-2. `.project-agent/context-starter-prompt.md`
-3. `.project-agent/context-takeover-drill.json`
-4. `.project-agent/governance-spec.json`
-5. `.project-agent/continuity-contract.json`
-6. `.project-agent/agent-runbook.json`
-7. `.project-agent/memory-graph.json`
-8. `.project-agent/process-trace.json`
-9. `.project-agent/development-trail.json`
-10. `.project-agent/architecture-map.json`
-11. `.project-agent/state-manifest.json`
-12. `.project-agent/takeover-packet.json`
-13. `.project-agent/continuity-audit.json`
-14. `.project-agent/takeover-acceptance-audit.json`
-15. `.project-agent/next-agent-prompt.md`
-16. `.project-agent/continuity.json`
-17. `.project-agent/resume.md`
-18. `.project-agent/recovery.md`
-19. `.project-agent/state.json`
-20. `PROJECT.md`
-21. `docs/architecture/principles.md`
-22. `docs/agents/roles.md`
+1. `.project-agent/takeover-summary.json`
+2. `npm run grep-context -- --project-dir /path/to/project --query "<task or active goal>" --limit 8`
+3. `.project-agent/context-starter-prompt.md`
+4. `.project-agent/takeover-packet.json`
+5. `.project-agent/process-trace.json#current`
+6. `.project-agent/architecture-map.json#recentChanges`
+7. `.project-agent/agent-context-bundle.json#quickStart`
+8. `.project-agent/continuity-contract.json`
+9. `.project-agent/state-manifest.json`
+10. `.project-agent/context-takeover-drill.json`
+11. `.project-agent/governance-spec.json`
+12. `.project-agent/agent-runbook.json`
+13. `.project-agent/memory-graph.json`
+14. `.project-agent/development-trail.json`
+15. `.project-agent/architecture-map.json`
+16. `.project-agent/continuity-audit.json`
+17. `.project-agent/takeover-acceptance-audit.json`
+18. `.project-agent/agent-context-bundle.json`
+19. `.project-agent/continuity.json`
+20. `.project-agent/resume.md`
+21. `.project-agent/recovery.md`
+22. `.project-agent/state.json`
+23. `PROJECT.md`
+24. `docs/architecture/principles.md`
+25. `docs/agents/roles.md`
 
-The agent context bundle is the one-file takeover index: quick start cursor, memory graph, process trace, development trail, architecture map, governance, audit, manifest verification, objective coverage, takeover acceptance, source files, and next command. The objective coverage map translates the project goal into evidence-backed rows for visible memory, dynamic process, managed architecture, and agent-neutral handoff. The takeover acceptance audit turns the user's objective into a pass/warn/fail checklist backed by durable files. The context starter prompt is generated from that bundle only, so a cold-start replacement agent can begin without depending on the previous chat or a live UI. The governance spec is the product-level contract: visible memory, dynamic process, managed architecture, and agent-neutral crash recovery. The continuity contract is the compact state contract: active goal, current cursor, capability status, inspect order, protected files, and proof checklist. The agent runbook turns that state into executable steps: takeover drill, interrupted-work resolution, architecture inspection, heartbeat, current-event recording, outcome recording, and handoff refresh. Each runbook step is marked `done`, `current`, `pending`, `skipped`, or `blocked`, with `activeStepId`, `nextCommand`, and proof gates so a replacement agent knows exactly what to do next. The memory graph file stores the full project graph as durable nodes, edges, and provenance refs, not just the UI drawing. The process trace file is the dynamic work cursor: previous event, current event, next expected event, event inspect order, and files touched. The development trail file connects that process cursor to touched files, impacted folders, takeover risk, and the inspect order a replacement agent should follow before editing. The architecture map file is the durable project structure: tree, modules, recent changes, impacted folders, files, and inspect order. The state manifest hashes the handoff files so a replacement agent can see whether it is reading one coherent snapshot. The freshness gate also records git HEAD, branch, dirty tree counts, untracked files, and state-file changes, so a handoff can be compared against the current repository snapshot. The temporal provenance audit records fact source refs, source hashes, observed times, validity windows, stale source refs, and contradictions across memory, decisions, process, and freshness state. The takeover packet is the concise startup index for a replacement agent: current cursor, first reads, first actions, guardrails, interrupted work, changed files, impacted folders, and next command. The continuity audit proves whether the handoff artifacts are present, schema-valid, and sufficient for takeover. The next-agent prompt is the paste-ready human prompt for any replacement coding agent. The full continuity file includes the active goal, current process cursor, previous event, next event, open acceptance targets, changed files, architecture totals, and next-agent instructions. Together they are the crash recovery contract: the next agent should not need the previous chat transcript to know what is happening.
+The takeover summary is the default handoff surface: active goal, current state, next step, risks, readiness, byte/token budgets, source refs, and the grep-first retrieval protocol. A replacement agent should not begin by reading the full `.project-agent/agent-context-bundle.json` or `.project-agent/continuity.json`; those files are source-of-truth archives for on-demand inspection. The agent context bundle is now a budgeted takeover index: each major section has a byte/token ceiling and falls back to summaries, hashes, and refs when the raw content is too large. Use `grep-context`, `jq`, or the `/api/context-read?ref=...` endpoint to inspect local fields, snippets, line ranges, and refs only when the summary or grep hits say they are needed. The objective coverage map translates the project goal into evidence-backed rows for visible memory, dynamic process, managed architecture, and agent-neutral handoff. The takeover acceptance audit turns the user's objective into a pass/warn/fail checklist backed by durable files. The context starter prompt is generated from the takeover summary, so a cold-start replacement agent can begin without depending on the previous chat or a live UI. The governance spec is the product-level contract: visible memory, dynamic process, managed architecture, and agent-neutral crash recovery. The continuity contract is the compact state contract: active goal, current cursor, capability status, inspect order, protected files, and proof checklist. The agent runbook turns that state into executable steps: summary read, grep-first context inspection, interrupted-work resolution, architecture inspection, heartbeat, current-event recording, outcome recording, and handoff refresh. Each runbook step is marked `done`, `current`, `pending`, `skipped`, or `blocked`, with `activeStepId`, `nextCommand`, and proof gates so a replacement agent knows exactly what to do next. The memory graph file stores the full project graph as durable nodes, edges, and provenance refs, not just the UI drawing. The process trace file is the dynamic work cursor: previous event, current event, next expected event, event inspect order, and files touched. The development trail file connects that process cursor to touched files, impacted folders, takeover risk, and the inspect order a replacement agent should follow before editing. The architecture map file is the durable project structure: tree, modules, recent changes, impacted folders, files, and inspect order. The state manifest hashes the handoff files so a replacement agent can see whether it is reading one coherent snapshot. The freshness gate also records git HEAD, branch, dirty files, untracked files, and state-file changes, so a handoff can be compared against the current repository snapshot. The temporal provenance audit records fact source refs, source hashes, observed times, validity windows, stale source refs, and contradictions across memory, decisions, process, and freshness state. The takeover packet is the concise startup index for a replacement agent: current cursor, first reads, first actions, guardrails, interrupted work, changed files, impacted folders, and next command. The continuity audit proves whether the handoff artifacts are present, schema-valid, and sufficient for takeover. The next-agent prompt is the paste-ready human prompt for any replacement coding agent. Together they are the crash recovery contract: the next agent should not need the previous chat transcript to know what is happening.
 
 ## Event Ingest
 
@@ -116,7 +120,7 @@ Recommended phases are `observe`, `plan`, `execute`, `evidence`, `audit`, and `h
 
 ## Universal Command Wrapper
 
-When possible, run external agent commands through `agent-run`. It wraps any command, records a `current` event before execution, records `done` or `failed` afterward, scans changed files, publishes the agent heartbeat, and refreshes `.project-agent/agent-context-bundle.json`, `.project-agent/governance-spec.json`, `.project-agent/continuity-contract.json`, `.project-agent/agent-runbook.json`, `.project-agent/memory-graph.json`, `.project-agent/process-trace.json`, `.project-agent/development-trail.json`, `.project-agent/architecture-map.json`, `.project-agent/state-manifest.json`, `.project-agent/takeover-packet.json`, `.project-agent/continuity-audit.json`, `.project-agent/takeover-acceptance-audit.json`, `.project-agent/next-agent-prompt.md`, `.project-agent/continuity.json`, `.project-agent/resume.md`, and `.project-agent/recovery.md`.
+When possible, run external agent commands through `agent-run`. It wraps any command, records a `current` event before execution, records `done` or `failed` afterward, scans changed files, publishes the agent heartbeat, and refreshes `.project-agent/takeover-summary.json`, `.project-agent/agent-context-bundle.json`, `.project-agent/context-starter-prompt.md`, `.project-agent/governance-spec.json`, `.project-agent/continuity-contract.json`, `.project-agent/agent-runbook.json`, `.project-agent/memory-graph.json`, `.project-agent/process-trace.json`, `.project-agent/development-trail.json`, `.project-agent/architecture-map.json`, `.project-agent/state-manifest.json`, `.project-agent/takeover-packet.json`, `.project-agent/continuity-audit.json`, `.project-agent/takeover-acceptance-audit.json`, `.project-agent/next-agent-prompt.md`, `.project-agent/continuity.json`, `.project-agent/resume.md`, and `.project-agent/recovery.md`.
 
 ```bash
 npm run agent-run -- \
@@ -135,29 +139,53 @@ Before a replacement agent trusts the handoff files, it can verify the manifest 
 npm run manifest -- --project-dir /path/to/project --verify
 ```
 
-To refresh or inspect the single-file takeover index without starting the UI:
+To refresh or inspect the summary-first takeover packet without starting the UI:
 
 ```bash
 npm run context -- --project-dir /path/to/project --write
 ```
 
-To prove that the bundle alone contains enough memory, process, architecture, governance, and validation state for a cold-start replacement agent:
+By default this prints the lean `.project-agent/takeover-summary.json` plus verification. Add `--full` to print the budgeted context bundle.
+
+To use grep-first retrieval as the default local context database:
+
+```bash
+npm run grep-context -- --project-dir /path/to/project --query "current task or active goal" --limit 8
+npm run grep-context -- --project-dir /path/to/project --read ".project-agent/process-trace.json:1-40" --max-bytes 6000
+```
+
+To generate or launch a Codex CLI agent with the summary-first and grep-first protocol:
+
+```bash
+npm run cli-agent -- --project-dir /path/to/project
+npm run cli-agent -- --project-dir /path/to/project --launch
+```
+
+To prove that the summary and budgeted bundle contain enough memory, process, architecture, governance, and validation state for a cold-start replacement agent:
 
 ```bash
 npm run context -- --project-dir /path/to/project --verify
 ```
 
-To generate a paste-ready starter prompt from the bundle only:
+To generate a paste-ready starter prompt from the takeover summary:
 
 ```bash
 npm run context-prompt -- --project-dir /path/to/project --write
 ```
 
-To rehearse the replacement agent's first actions from the bundle only:
+To rehearse the replacement agent's first actions from the takeover summary and budgeted bundle:
 
 ```bash
 npm run context-drill -- --project-dir /path/to/project --write
 ```
+
+To run a read-only Codex takeover smoke test and record token usage/evidence:
+
+```bash
+npm run codex-smoke -- --project-dir /path/to/project
+```
+
+The CLI writes `.project-agent/codex-takeover-smoke.json`, records a runtime audit event, and refreshes process trace/resume/recovery artifacts by default. Use `--no-refresh` only when you want to inspect the smoke artifact without updating handoff files.
 
 To audit whether the user's objective is actually covered by durable state:
 
@@ -175,7 +203,7 @@ The server also watches the project tree. When a source, docs, config, test, or 
 ws://127.0.0.1:4147/events
 ```
 
-The UI listens to this stream and refreshes **AI State** immediately, so external agents can edit files while the user sees the process stream, knowledge graph, architecture tree, and crash handoff update without manual refresh. Generated continuity files such as `.project-agent/runtime.json`, `.project-agent/continuity-contract.json`, `.project-agent/continuity.json`, `.project-agent/recovery.md`, and `.project-agent/resume.md` are filtered out of architecture-change noise.
+The UI listens to this stream and refreshes **AI State** immediately, so external agents can edit files while the user sees the process stream, knowledge graph, architecture tree, and crash handoff update without manual refresh. Internally generated `.project-agent` files are kept out of architecture-change noise, while real project source, docs, config, and tests still produce architecture events.
 
 ## Agent Leases
 
@@ -213,17 +241,21 @@ The server debounces runtime changes and automatically refreshes the handoff fil
 
 ```text
 .project-agent/continuity.json
+.project-agent/takeover-summary.json
 .project-agent/agent-context-bundle.json
 .project-agent/context-starter-prompt.md
 .project-agent/context-takeover-drill.json
 .project-agent/governance-spec.json
+.project-agent/continuity-contract.json
 .project-agent/agent-runbook.json
 .project-agent/memory-graph.json
 .project-agent/process-trace.json
+.project-agent/development-trail.json
 .project-agent/architecture-map.json
 .project-agent/state-manifest.json
 .project-agent/takeover-packet.json
 .project-agent/continuity-audit.json
+.project-agent/takeover-acceptance-audit.json
 .project-agent/next-agent-prompt.md
 .project-agent/recovery.md
 .project-agent/resume.md
@@ -287,7 +319,7 @@ This writes `.project-agent/recovery.md`. The same content is available over HTT
 curl 'http://127.0.0.1:4147/api/recovery?role=coding_agent&format=markdown&write=1'
 ```
 
-The brief summarizes the active goal, current cursor, previous and next events, recent events, changed files, graph size, and read-first state files. A replacement agent should read `recovery.md` after `continuity.json` and before editing.
+The brief summarizes the active goal, current cursor, previous and next events, recent events, changed files, graph size, and read-first state files. A replacement agent should read `.project-agent/takeover-summary.json` first, then use `recovery.md` only when it needs the larger human-readable crash brief.
 
 ## Resume Packet
 
@@ -303,7 +335,7 @@ This writes `.project-agent/resume.md` and, by default, refreshes `.project-agen
 curl 'http://127.0.0.1:4147/api/resume?role=coding_agent&format=markdown&write=1'
 ```
 
-Use `resume.md` as the first human-readable packet after `continuity.json`: it contains the current objective, current cursor, previous and expected next event, changed files, recent events, and read-first files. It is meant for the “prior agent crashed, continue now” case.
+Use `resume.md` as a human-readable companion to `.project-agent/takeover-summary.json`: it contains the current objective, current cursor, previous and expected next event, changed files, recent events, and read-first files. It is meant for the "prior agent crashed, continue now" case.
 
 ## Run In Development
 

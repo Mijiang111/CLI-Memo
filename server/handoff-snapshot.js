@@ -67,6 +67,7 @@ export function createAutoHandoffSnapshot(projectDir, { role = "coding_agent", d
           nextAgentPromptFile: result.file,
           contextStarterPromptFile: contextPrompt.file,
           contextTakeoverDrillFile: contextDrill.file,
+          takeoverSummaryFile: ".project-agent/takeover-summary.json",
           takeoverAcceptanceAuditFile: takeoverAcceptance.file,
           resumeFile: result.resumeFile,
           recoveryFile: result.recoveryFile,

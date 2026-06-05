@@ -153,6 +153,7 @@ try {
   if (!initialInsights.architecture?.totals?.files) throw new Error("insights missing architecture file count");
   if (!initialInsights.process?.workstreams?.lanes?.some((lane) => lane.id === "strategy")) throw new Error("insights missing workstream lanes");
   if (!initialInsights.continuity?.stateRefs?.includes(".project-agent/governance-spec.json")) throw new Error("insights missing governance spec state ref");
+  if (!initialInsights.continuity?.stateRefs?.includes(".project-agent/takeover-summary.json")) throw new Error("insights missing takeover summary state ref");
   if (!initialInsights.continuity?.stateRefs?.includes(".project-agent/agent-context-bundle.json")) throw new Error("insights missing agent context bundle state ref");
   if (!initialInsights.continuity?.stateRefs?.includes(".project-agent/continuity.json")) throw new Error("insights missing continuity state refs");
   if (!initialInsights.continuity?.stateRefs?.includes(".project-agent/continuity-contract.json")) throw new Error("insights missing continuity contract state ref");
@@ -203,20 +204,20 @@ try {
   if (!initialInsights.continuity?.agentRunbook?.steps?.every((step) => step.status && step.tone)) {
     throw new Error(`agent runbook steps missing dynamic status: ${JSON.stringify(initialInsights.continuity?.agentRunbook?.steps)}`);
   }
-  if (!initialInsights.continuity?.startProtocol?.readFirst?.some((item) => item.path === ".project-agent/continuity.json")) {
-    throw new Error(`insights missing start protocol read-first list: ${JSON.stringify(initialInsights.continuity?.startProtocol)}`);
+  if (!initialInsights.continuity?.startProtocol?.readFirst?.some((item) => item.path === ".project-agent/takeover-summary.json")) {
+    throw new Error(`insights missing summary-first start protocol: ${JSON.stringify(initialInsights.continuity?.startProtocol)}`);
   }
-  if (initialInsights.continuity?.startProtocol?.readFirst?.[0]?.path !== ".project-agent/agent-context-bundle.json") {
-    throw new Error(`insights start protocol should begin with context bundle: ${JSON.stringify(initialInsights.continuity?.startProtocol?.readFirst)}`);
+  if (initialInsights.continuity?.startProtocol?.readFirst?.[0]?.path !== ".project-agent/takeover-summary.json") {
+    throw new Error(`insights start protocol should begin with takeover summary: ${JSON.stringify(initialInsights.continuity?.startProtocol?.readFirst)}`);
   }
-  if (!initialInsights.continuity?.startProtocol?.readFirst?.some((item) => item.path === ".project-agent/governance-spec.json")) {
-    throw new Error(`insights missing governance spec read-first item: ${JSON.stringify(initialInsights.continuity?.startProtocol)}`);
+  if (!initialInsights.continuity?.startProtocol?.readFirst?.some((item) => item.path === ".project-agent/context-starter-prompt.md")) {
+    throw new Error(`insights missing context starter prompt read-first item: ${JSON.stringify(initialInsights.continuity?.startProtocol)}`);
   }
   if (!initialInsights.continuity?.startProtocol?.readFirst?.some((item) => item.path === ".project-agent/continuity-contract.json")) {
     throw new Error(`insights missing continuity contract read-first item: ${JSON.stringify(initialInsights.continuity?.startProtocol)}`);
   }
-  if (!initialInsights.continuity?.startProtocol?.readFirst?.some((item) => item.path === ".project-agent/agent-runbook.json")) {
-    throw new Error(`insights missing agent runbook read-first item: ${JSON.stringify(initialInsights.continuity?.startProtocol)}`);
+  if (!initialInsights.continuity?.startProtocol?.readFirst?.some((item) => item.path === ".project-agent/agent-context-bundle.json")) {
+    throw new Error(`insights missing budgeted bundle read-first item: ${JSON.stringify(initialInsights.continuity?.startProtocol)}`);
   }
   if (!initialInsights.continuity?.startProtocol?.readFirst?.some((item) => item.path === ".project-agent/process-trace.json")) {
     throw new Error(`insights missing process trace read-first item: ${JSON.stringify(initialInsights.continuity?.startProtocol)}`);
@@ -302,7 +303,7 @@ try {
     throw new Error(`state manifest cli missing ok verification: ${manifestCli.stdout}`);
   }
   const contextBundleEndpoint = await get("/api/agent-context-bundle?write=1");
-  if (contextBundleEndpoint.agentContextBundle?.schemaVersion !== "project-agent.context-bundle.v1" || !contextBundleEndpoint.agentContextBundle?.contentHash || !contextBundleEndpoint.agentContextBundle?.memory?.graph?.nodes?.length || !contextBundleEndpoint.agentContextBundle?.process?.trace?.current || !contextBundleEndpoint.agentContextBundle?.architecture?.map?.tree?.length || !contextBundleEndpoint.agentContextBundle?.validation?.stateManifestVerification?.ok || contextBundleEndpoint.agentContextBundle?.validation?.disclosureGate?.schemaVersion !== "project-agent.disclosure-gate.v1" || contextBundleEndpoint.agentContextBundle?.validation?.freshnessGate?.schemaVersion !== "project-agent.freshness-gate.v1" || contextBundleEndpoint.agentContextBundle?.validation?.phaseLedger?.schemaVersion !== "project-agent.phase-ledger.v1" || contextBundleEndpoint.agentContextBundle?.validation?.checkpointLedger?.schemaVersion !== "project-agent.checkpoint-ledger.v1" || contextBundleEndpoint.agentContextBundle?.validation?.decisionLedger?.schemaVersion !== "project-agent.decision-ledger.v1" || contextBundleEndpoint.agentContextBundle?.validation?.stateBoundary?.schemaVersion !== "project-agent.state-boundary-audit.v1" || contextBundleEndpoint.agentContextBundle?.validation?.runtimeEval?.schemaVersion !== "project-agent.runtime-eval.v1" || contextBundleEndpoint.agentContextBundle?.validation?.hookIngressAudit?.schemaVersion !== "project-agent.hook-ingress-audit.v1" || contextBundleEndpoint.agentContextBundle?.validation?.provenanceLedger?.schemaVersion !== "project-agent.provenance-ledger.v1" || contextBundleEndpoint.agentContextBundle?.validation?.attentionPack?.schemaVersion !== "project-agent.attention-pack.v1" || !contextBundleEndpoint.agentContextBundle?.validation?.attentionPack?.items?.length || contextBundleEndpoint.agentContextBundle?.validation?.preEditRisk?.schemaVersion !== "project-agent.pre-edit-risk.v1" || contextBundleEndpoint.agentContextBundle?.handoff?.lifecycle?.schemaVersion !== "project-agent.handoff-lifecycle.v1") {
+  if (contextBundleEndpoint.agentContextBundle?.schemaVersion !== "project-agent.context-bundle.v1" || !contextBundleEndpoint.agentContextBundle?.contentHash || contextBundleEndpoint.agentContextBundle?.readOrder?.[0] !== ".project-agent/takeover-summary.json" || !contextBundleEndpoint.agentContextBundle?.memory?.budget || !contextBundleEndpoint.agentContextBundle?.process?.budget || !contextBundleEndpoint.agentContextBundle?.architecture?.budget || !contextBundleEndpoint.agentContextBundle?.handoff?.budget || !contextBundleEndpoint.agentContextBundle?.process?.trace?.current || !contextBundleEndpoint.agentContextBundle?.validation?.stateManifestVerification?.ok || contextBundleEndpoint.agentContextBundle?.validation?.disclosureGate?.schemaVersion !== "project-agent.disclosure-gate.v1" || contextBundleEndpoint.agentContextBundle?.validation?.attentionPack?.schemaVersion !== "project-agent.attention-pack.v1" || !contextBundleEndpoint.agentContextBundle?.validation?.attentionPack?.items?.length || contextBundleEndpoint.takeoverSummary?.schemaVersion !== "project-agent.takeover-summary.v1" || !contextBundleEndpoint.takeoverSummary?.onDemandReads?.length) {
     throw new Error(`agent context bundle endpoint missing takeover context: ${JSON.stringify(contextBundleEndpoint.agentContextBundle)}`);
   }
   if (contextBundleEndpoint.agentContextBundle?.validation?.disclosureGate?.packing?.schemaVersion !== "project-agent.prompt-packing-gate.v1" || !contextBundleEndpoint.agentContextBundle?.validation?.disclosureGate?.packing?.limits?.maxFiles || !Array.isArray(contextBundleEndpoint.agentContextBundle?.validation?.disclosureGate?.packing?.omittedRefs)) {
@@ -330,8 +331,8 @@ try {
   );
   if (contextCli.status !== 0) throw new Error(`agent context cli failed: ${contextCli.stderr || contextCli.stdout}`);
   const contextCliJson = JSON.parse(contextCli.stdout);
-  if (contextCliJson.agentContextBundle?.schemaVersion !== "project-agent.context-bundle.v1" || !contextCliJson.agentContextBundle?.quickStart?.nextCommand) {
-    throw new Error(`agent context cli missing portable quickStart: ${contextCli.stdout}`);
+  if (contextCliJson.agentContextBundle || contextCliJson.takeoverSummary?.schemaVersion !== "project-agent.takeover-summary.v1" || !contextCliJson.takeoverSummary?.currentState || !contextCliJson.takeoverSummary?.onDemandReads?.length) {
+    throw new Error(`agent context cli should default to lean takeover summary: ${contextCli.stdout}`);
   }
   if (!contextCliJson.verification?.canResume || !contextCliJson.verification?.checks?.some((check) => check.id === "architecture_map" && check.status === "ok") || !contextCliJson.verification?.checks?.some((check) => check.id === "code_graph") || !contextCliJson.verification?.checks?.some((check) => check.id === "disclosure_gate") || !contextCliJson.verification?.checks?.some((check) => check.id === "freshness_gate") || !contextCliJson.verification?.checks?.some((check) => check.id === "phase_ledger") || !contextCliJson.verification?.checks?.some((check) => check.id === "checkpoint_ledger") || !contextCliJson.verification?.checks?.some((check) => check.id === "decision_ledger") || !contextCliJson.verification?.checks?.some((check) => check.id === "state_boundary") || !contextCliJson.verification?.checks?.some((check) => check.id === "runtime_eval") || !contextCliJson.verification?.checks?.some((check) => check.id === "hook_ingress") || !contextCliJson.verification?.checks?.some((check) => check.id === "provenance_ledger") || !contextCliJson.verification?.checks?.some((check) => check.id === "attention_pack") || !contextCliJson.verification?.checks?.some((check) => check.id === "pre_edit_risk") || !contextCliJson.verification?.checks?.some((check) => check.id === "handoff_lifecycle")) {
     throw new Error(`agent context cli missing bundle-only verification: ${contextCli.stdout}`);
@@ -339,25 +340,16 @@ try {
   if (!contextCliJson.verification?.checks?.some((check) => check.id === "temporal_provenance")) {
     throw new Error(`agent context cli missing temporal provenance verification: ${contextCli.stdout}`);
   }
-  if (contextCliJson.agentContextBundle?.validation?.disclosureGate?.packing?.schemaVersion !== "project-agent.prompt-packing-gate.v1" || !contextCliJson.verification?.checks?.some((check) => check.id === "prompt_packing_gate")) {
+  if (!contextCliJson.verification?.checks?.some((check) => check.id === "prompt_packing_gate")) {
     throw new Error(`agent context cli missing prompt packing gate: ${contextCli.stdout}`);
   }
   const contextPromptEndpoint = await fetch(`${base}/api/agent-context-prompt?format=markdown&write=1`);
   if (!contextPromptEndpoint.ok) throw new Error(`/api/agent-context-prompt failed ${contextPromptEndpoint.status}: ${await contextPromptEndpoint.text()}`);
   const contextPromptMarkdown = await contextPromptEndpoint.text();
-  if (!contextPromptMarkdown.includes("Bundle-Only Next Agent Starter Prompt") || !contextPromptMarkdown.includes("## Bundle Gate") || !contextPromptMarkdown.includes("## Attention Pack") || !contextPromptMarkdown.includes("## Freshness Gate") || !contextPromptMarkdown.includes("## Runtime Eval") || !contextPromptMarkdown.includes("## Phase Ledger") || !contextPromptMarkdown.includes("## Checkpoint Ledger") || !contextPromptMarkdown.includes("## Decision Ledger") || !contextPromptMarkdown.includes("## Temporal Provenance") || !contextPromptMarkdown.includes("## State Boundary") || !contextPromptMarkdown.includes("## Code Graph") || !contextPromptMarkdown.includes("## Hook Ingress") || !contextPromptMarkdown.includes("## Provenance Ledger") || !contextPromptMarkdown.includes("## Disclosure Gate") || !contextPromptMarkdown.includes("## Pre-Edit Risk") || !contextPromptMarkdown.includes("## Handoff Lifecycle") || !contextPromptMarkdown.includes("## Objective Coverage") || !contextPromptMarkdown.includes("## Takeover Acceptance") || !contextPromptMarkdown.includes("## Memory Snapshot") || !contextPromptMarkdown.includes("Development trail:") || !contextPromptMarkdown.includes("## Architecture Snapshot")) {
-    throw new Error(`agent context prompt endpoint missing bundle-only sections: ${contextPromptMarkdown.slice(0, 500)}`);
+  if (!contextPromptMarkdown.includes("Takeover Starter Prompt") || !contextPromptMarkdown.includes("## Takeover Gate") || !contextPromptMarkdown.includes("## Current State") || !contextPromptMarkdown.includes("## Next Step") || !contextPromptMarkdown.includes("## Memory Budget") || !contextPromptMarkdown.includes("## On-Demand Reads")) {
+    throw new Error(`agent context prompt endpoint missing summary-first sections: ${contextPromptMarkdown.slice(0, 500)}`);
   }
-  if (!contextPromptMarkdown.includes("packed files:") || !contextPromptMarkdown.includes("omitted refs:")) {
-    throw new Error(`agent context prompt endpoint missing prompt packing details: ${contextPromptMarkdown.slice(0, 500)}`);
-  }
-  if (!contextPromptMarkdown.includes("backpressure:")) {
-    throw new Error(`agent context prompt endpoint missing hook backpressure details: ${contextPromptMarkdown.slice(0, 500)}`);
-  }
-  if (gitSmokeInitialized && (!contextPromptMarkdown.includes("- git:") || !contextPromptMarkdown.includes("dirty tree:"))) {
-    throw new Error(`agent context prompt endpoint missing git freshness details: ${contextPromptMarkdown.slice(0, 500)}`);
-  }
-  if (!readFileSync(path.join(projectDir, ".project-agent", "context-starter-prompt.md"), "utf8").includes("Bundle-Only Next Agent Starter Prompt")) {
+  if (!readFileSync(path.join(projectDir, ".project-agent", "context-starter-prompt.md"), "utf8").includes("Takeover Starter Prompt")) {
     throw new Error("context-starter-prompt.md was not written by endpoint");
   }
   const contextPromptCli = spawnSync(
@@ -366,7 +358,7 @@ try {
     { encoding: "utf8" }
   );
   if (contextPromptCli.status !== 0) throw new Error(`agent context prompt cli failed: ${contextPromptCli.stderr || contextPromptCli.stdout}`);
-  if (!contextPromptCli.stdout.includes("Bundle-Only Next Agent Starter Prompt") || !readFileSync(path.join(projectDir, ".project-agent", "context-starter-prompt.md"), "utf8").includes("## Current Cursor")) {
+  if (!contextPromptCli.stdout.includes("Takeover Starter Prompt") || !readFileSync(path.join(projectDir, ".project-agent", "context-starter-prompt.md"), "utf8").includes("## Current State")) {
     throw new Error(`agent context prompt cli missing starter content: ${contextPromptCli.stdout.slice(0, 500)}`);
   }
   const contextDrillEndpoint = await get("/api/agent-context-drill?write=1");
@@ -411,8 +403,8 @@ try {
   if (!runbookFile.steps?.some((step) => step.id === "verify_state_manifest" && step.command?.includes("npm run manifest"))) {
     throw new Error(`agent runbook file missing manifest verification step: ${JSON.stringify(runbookFile.steps)}`);
   }
-  if (runbookFile.steps?.[0]?.id !== "read_context_bundle") {
-    throw new Error(`agent runbook should begin with context bundle: ${JSON.stringify(runbookFile.steps?.slice(0, 3))}`);
+  if (runbookFile.steps?.[0]?.id !== "read_takeover_summary" || runbookFile.steps?.[1]?.id !== "inspect_budgeted_context") {
+    throw new Error(`agent runbook should begin with takeover summary and budgeted context: ${JSON.stringify(runbookFile.steps?.slice(0, 3))}`);
   }
   if (!runbookFile.proofGates?.every((gate) => gate.status)) {
     throw new Error(`agent runbook file proof gates missing status: ${JSON.stringify(runbookFile.proofGates)}`);
@@ -449,7 +441,42 @@ try {
     throw new Error(`takeover acceptance audit file missing user-objective proof: ${JSON.stringify(takeoverAcceptanceFile)}`);
   }
   const agentContextBundleFile = JSON.parse(readFileSync(path.join(projectDir, ".project-agent", "agent-context-bundle.json"), "utf8"));
-  if (agentContextBundleFile.schemaVersion !== "project-agent.context-bundle.v1" || !agentContextBundleFile.contentHash || !agentContextBundleFile.quickStart?.currentCursor || !agentContextBundleFile.memory?.graph?.edges?.length || !agentContextBundleFile.process?.trace?.schemaVersion || !agentContextBundleFile.process?.developmentTrail?.schemaVersion || !agentContextBundleFile.readOrder?.includes(".project-agent/development-trail.json") || !agentContextBundleFile.readOrder?.includes(".project-agent/takeover-acceptance-audit.json") || !agentContextBundleFile.architecture?.map?.schemaVersion || agentContextBundleFile.architecture?.codeGraph?.schemaVersion !== "project-agent.code-graph.v1" || !agentContextBundleFile.validation?.stateManifestVerification?.ok || !agentContextBundleFile.validation?.agentContextBundleVerification?.canResume || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "disclosure_gate") || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "freshness_gate") || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "phase_ledger") || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "decision_ledger") || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "state_boundary") || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "code_graph") || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "runtime_eval") || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "hook_ingress") || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "provenance_ledger") || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "attention_pack") || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "pre_edit_risk") || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "handoff_lifecycle") || agentContextBundleFile.validation?.disclosureGate?.schemaVersion !== "project-agent.disclosure-gate.v1" || agentContextBundleFile.validation?.freshnessGate?.schemaVersion !== "project-agent.freshness-gate.v1" || agentContextBundleFile.validation?.phaseLedger?.schemaVersion !== "project-agent.phase-ledger.v1" || agentContextBundleFile.validation?.decisionLedger?.schemaVersion !== "project-agent.decision-ledger.v1" || agentContextBundleFile.validation?.stateBoundary?.schemaVersion !== "project-agent.state-boundary-audit.v1" || agentContextBundleFile.validation?.runtimeEval?.schemaVersion !== "project-agent.runtime-eval.v1" || agentContextBundleFile.validation?.hookIngressAudit?.schemaVersion !== "project-agent.hook-ingress-audit.v1" || agentContextBundleFile.validation?.provenanceLedger?.schemaVersion !== "project-agent.provenance-ledger.v1" || agentContextBundleFile.validation?.attentionPack?.schemaVersion !== "project-agent.attention-pack.v1" || !agentContextBundleFile.validation?.attentionPack?.items?.length || agentContextBundleFile.validation?.preEditRisk?.schemaVersion !== "project-agent.pre-edit-risk.v1" || agentContextBundleFile.handoff?.lifecycle?.schemaVersion !== "project-agent.handoff-lifecycle.v1" || agentContextBundleFile.validation?.objectiveCoverage?.schemaVersion !== "project-agent.objective-coverage.v1" || agentContextBundleFile.validation?.takeoverAcceptanceAudit?.schemaVersion !== "project-agent.takeover-acceptance-audit.v1") {
+  const memoryGraphSchema = agentContextBundleFile.memory?.graph?.schemaVersion;
+  const processTraceSchema = agentContextBundleFile.process?.trace?.schemaVersion;
+  const developmentTrailSchema = agentContextBundleFile.process?.developmentTrail?.schemaVersion;
+  const architectureMapSchema = agentContextBundleFile.architecture?.map?.schemaVersion;
+  const codeGraphSchema = agentContextBundleFile.architecture?.codeGraph?.schemaVersion || agentContextBundleFile.architecture?.map?.codeGraph?.schemaVersion;
+  if (
+    agentContextBundleFile.schemaVersion !== "project-agent.context-bundle.v1" ||
+    !agentContextBundleFile.contentHash ||
+    !agentContextBundleFile.quickStart?.currentCursor ||
+    agentContextBundleFile.readOrder?.[0] !== ".project-agent/takeover-summary.json" ||
+    !agentContextBundleFile.readOrder?.includes(".project-agent/agent-context-bundle.json#quickStart") ||
+    !agentContextBundleFile.memory?.budget ||
+    !agentContextBundleFile.process?.budget ||
+    !agentContextBundleFile.architecture?.budget ||
+    !agentContextBundleFile.handoff?.budget ||
+    !["project-agent.memory-graph.v1", "project-agent.memory-graph-summary.v1"].includes(memoryGraphSchema) ||
+    !["project-agent.process-trace.v1", "project-agent.process-trace-summary.v1"].includes(processTraceSchema) ||
+    !["project-agent.development-trail.v1", "project-agent.development-trail-summary.v1"].includes(developmentTrailSchema) ||
+    !["project-agent.architecture-map.v1", "project-agent.architecture-map-summary.v1"].includes(architectureMapSchema) ||
+    !["project-agent.code-graph.v1", "project-agent.code-graph-summary.v1"].includes(codeGraphSchema) ||
+    !agentContextBundleFile.validation?.stateManifestVerification?.ok ||
+    !agentContextBundleFile.validation?.agentContextBundleVerification?.canResume ||
+    !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "disclosure_gate") ||
+    !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "freshness_gate") ||
+    !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "phase_ledger") ||
+    !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "decision_ledger") ||
+    !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "state_boundary") ||
+    !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "code_graph") ||
+    !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "runtime_eval") ||
+    !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "hook_ingress") ||
+    !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "attention_pack") ||
+    agentContextBundleFile.validation?.disclosureGate?.schemaVersion !== "project-agent.disclosure-gate.v1" ||
+    agentContextBundleFile.validation?.attentionPack?.schemaVersion !== "project-agent.attention-pack.v1" ||
+    !agentContextBundleFile.validation?.attentionPack?.items?.length ||
+    agentContextBundleFile.validation?.takeoverAcceptanceAudit?.schemaVersion !== "project-agent.takeover-acceptance-audit.v1"
+  ) {
     throw new Error(`agent context bundle file missing portable context: ${JSON.stringify(agentContextBundleFile)}`);
   }
   if (agentContextBundleFile.validation?.checkpointLedger?.schemaVersion !== "project-agent.checkpoint-ledger.v1" || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "checkpoint_ledger")) {
@@ -464,8 +491,12 @@ try {
   if (agentContextBundleFile.validation?.temporalProvenance?.schemaVersion !== "project-agent.temporal-provenance-audit.v1" || !agentContextBundleFile.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "temporal_provenance") || !agentContextBundleFile.validation?.temporalProvenance?.checks?.some((check) => check.id === "contradictions")) {
     throw new Error(`agent context bundle file missing temporal provenance: ${JSON.stringify(agentContextBundleFile.validation?.temporalProvenance)}`);
   }
+  const takeoverSummaryFile = JSON.parse(readFileSync(path.join(projectDir, ".project-agent", "takeover-summary.json"), "utf8"));
+  if (takeoverSummaryFile.schemaVersion !== "project-agent.takeover-summary.v1" || takeoverSummaryFile.budget?.status !== "ok" || typeof takeoverSummaryFile.takeover?.canTakeOver !== "boolean" || !takeoverSummaryFile.onDemandReads?.length || takeoverSummaryFile.defaultReadOrder?.[0] !== ".project-agent/takeover-summary.json") {
+    throw new Error(`takeover summary file missing lean takeover contract: ${JSON.stringify(takeoverSummaryFile)}`);
+  }
   const stateManifestFile = JSON.parse(readFileSync(path.join(projectDir, ".project-agent", "state-manifest.json"), "utf8"));
-  if (stateManifestFile.schemaVersion !== "project-agent.state-manifest.v1" || !stateManifestFile.aggregateHash || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-packet.json" && file.sha256) || !stateManifestFile.files?.some((file) => file.path === ".project-agent/development-trail.json" && file.sha256) || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-acceptance-audit.json" && file.sha256)) {
+  if (stateManifestFile.schemaVersion !== "project-agent.state-manifest.v1" || !stateManifestFile.aggregateHash || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-summary.json") || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-packet.json" && file.sha256) || !stateManifestFile.files?.some((file) => file.path === ".project-agent/development-trail.json" && file.sha256) || !stateManifestFile.files?.some((file) => file.path === ".project-agent/takeover-acceptance-audit.json" && file.sha256)) {
     throw new Error(`state manifest file missing takeover packet hash: ${JSON.stringify(stateManifestFile)}`);
   }
   const nextAgentPromptFile = readFileSync(path.join(projectDir, ".project-agent", "next-agent-prompt.md"), "utf8");
@@ -776,11 +807,11 @@ try {
   if (!codeWorkstreamInsights.continuity?.continuityContract?.capabilities?.some((item) => item.id === "code_graph") || codeWorkstreamInsights.continuity?.continuityContract?.sourceOfTruth?.codeGraph !== ".project-agent/architecture-map.json#codeGraph") {
     throw new Error(`continuity contract missing code graph capability/source: ${JSON.stringify(codeWorkstreamInsights.continuity?.continuityContract)}`);
   }
-  if (codeWorkstreamInsights.continuity?.agentContextBundle?.architecture?.codeGraph?.schemaVersion !== "project-agent.code-graph.v1" || !codeWorkstreamInsights.continuity?.agentContextBundle?.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "code_graph")) {
+  if (!["project-agent.code-graph.v1", "project-agent.code-graph-summary.v1"].includes(codeWorkstreamInsights.continuity?.agentContextBundle?.architecture?.codeGraph?.schemaVersion) || !codeWorkstreamInsights.continuity?.agentContextBundle?.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "code_graph")) {
     throw new Error(`agent context bundle missing verified code graph: ${JSON.stringify(codeWorkstreamInsights.continuity?.agentContextBundle?.architecture?.codeGraph)}`);
   }
-  if (!codeWorkstreamInsights.continuity?.agentContextBundle?.validation?.attentionPack?.items?.some((item) => item.id === "code_graph") || !codeWorkstreamInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.claims?.some((claim) => claim.id === "code_graph")) {
-    throw new Error(`agent context bundle missing code graph attention/provenance: ${JSON.stringify(codeWorkstreamInsights.continuity?.agentContextBundle?.validation)}`);
+  if (!codeWorkstreamInsights.continuity?.agentContextBundle?.architecture?.codeGraph?.sourceRef || !codeWorkstreamInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.claims?.some((claim) => claim.id === "code_graph")) {
+    throw new Error(`agent context bundle missing code graph source/provenance: ${JSON.stringify(codeWorkstreamInsights.continuity?.agentContextBundle?.validation)}`);
   }
   if (!codeWorkstreamInsights.knowledgeGraph?.nodes?.some((node) => node.kind === "workstream" && node.label === "Code Development")) {
     throw new Error("code development workstream node missing from knowledge graph");
@@ -882,7 +913,11 @@ try {
     { encoding: "utf8" }
   );
   if (wrappedCommand.status !== 0) throw new Error(`agent-run cli failed: ${wrappedCommand.stderr || wrappedCommand.stdout}`);
-  const wrappedInsights = await get(`/api/insights?role=coding_agent&goal=${goalId}`);
+  let wrappedInsights = await get(`/api/insights?role=coding_agent&goal=${goalId}`);
+  if (wrappedInsights.continuity?.handoffSnapshot?.status === "writing") {
+    await wait(1500);
+    wrappedInsights = await get(`/api/insights?role=coding_agent&goal=${goalId}`);
+  }
   if (!wrappedInsights.process?.events?.some((event) => event.title === "Wrapped command smoke finished" && event.source === "agent-run")) {
     throw new Error(`agent-run event missing from process: ${JSON.stringify(wrappedInsights.process?.events)}`);
   }
@@ -990,23 +1025,17 @@ try {
   if (!drill.canResume) {
     throw new Error(`takeover drill endpoint is not resumable: ${JSON.stringify(drill)}`);
   }
-  if (drill.nextAgentBrief?.firstRead?.[0]?.path !== ".project-agent/agent-context-bundle.json") {
-    throw new Error(`takeover drill read order should begin with context bundle: ${JSON.stringify(drill.nextAgentBrief?.firstRead)}`);
+  if (drill.nextAgentBrief?.firstRead?.[0]?.path !== ".project-agent/takeover-summary.json") {
+    throw new Error(`takeover drill read order should begin with takeover summary: ${JSON.stringify(drill.nextAgentBrief?.firstRead)}`);
+  }
+  if (!drill.nextAgentBrief?.firstRead?.some((item) => item.path === ".project-agent/takeover-summary.json" && item.exists)) {
+    throw new Error(`takeover drill endpoint missing readable takeover summary: ${JSON.stringify(drill.nextAgentBrief?.firstRead)}`);
   }
   if (!drill.nextAgentBrief?.firstRead?.some((item) => item.path === ".project-agent/agent-context-bundle.json" && item.exists)) {
     throw new Error(`takeover drill endpoint missing readable context bundle: ${JSON.stringify(drill.nextAgentBrief?.firstRead)}`);
   }
-  if (!drill.nextAgentBrief?.firstRead?.some((item) => item.path === ".project-agent/governance-spec.json" && item.exists)) {
-    throw new Error(`takeover drill endpoint missing readable governance spec: ${JSON.stringify(drill.nextAgentBrief?.firstRead)}`);
-  }
   if (!drill.nextAgentBrief?.firstRead?.some((item) => item.path === ".project-agent/continuity-contract.json" && item.exists)) {
     throw new Error(`takeover drill endpoint missing readable continuity contract: ${JSON.stringify(drill.nextAgentBrief?.firstRead)}`);
-  }
-  if (!drill.nextAgentBrief?.firstRead?.some((item) => item.path === ".project-agent/agent-runbook.json" && item.exists)) {
-    throw new Error(`takeover drill endpoint missing readable agent runbook: ${JSON.stringify(drill.nextAgentBrief?.firstRead)}`);
-  }
-  if (!drill.nextAgentBrief?.firstRead?.some((item) => item.path === ".project-agent/memory-graph.json" && item.exists)) {
-    throw new Error(`takeover drill endpoint missing readable memory graph: ${JSON.stringify(drill.nextAgentBrief?.firstRead)}`);
   }
   if (!drill.nextAgentBrief?.firstRead?.some((item) => item.path === ".project-agent/state-manifest.json" && item.exists)) {
     throw new Error(`takeover drill endpoint missing readable state manifest: ${JSON.stringify(drill.nextAgentBrief?.firstRead)}`);
@@ -1014,11 +1043,12 @@ try {
   if (!drill.nextAgentBrief?.firstRead?.some((item) => item.path === ".project-agent/process-trace.json" && item.exists)) {
     throw new Error(`takeover drill endpoint missing readable process trace: ${JSON.stringify(drill.nextAgentBrief?.firstRead)}`);
   }
-  if (!drill.nextAgentBrief?.firstRead?.some((item) => item.path === ".project-agent/development-trail.json" && item.exists)) {
-    throw new Error(`takeover drill endpoint missing readable development trail: ${JSON.stringify(drill.nextAgentBrief?.firstRead)}`);
-  }
   if (!drill.nextAgentBrief?.firstRead?.some((item) => item.path === ".project-agent/architecture-map.json" && item.exists)) {
     throw new Error(`takeover drill endpoint missing readable architecture map: ${JSON.stringify(drill.nextAgentBrief?.firstRead)}`);
+  }
+  const drillStateRefs = drill.nextAgentBrief?.stateRefs || drill.checks?.find((check) => check.id === "state_refs")?.refs || [];
+  if (!drillStateRefs.includes(".project-agent/takeover-summary.json") || !drillStateRefs.includes(".project-agent/agent-context-bundle.json") || !drillStateRefs.includes(".project-agent/process-trace.json")) {
+    throw new Error(`takeover drill endpoint missing on-demand detail refs: ${JSON.stringify(drillStateRefs)}`);
   }
   if (drill.nextAgentBrief?.schemaVersion !== "project-agent.takeover-packet.v1" || !drill.nextAgentBrief?.nextCommand) {
     throw new Error(`takeover drill endpoint missing next-agent packet schema/command: ${JSON.stringify(drill.nextAgentBrief)}`);
@@ -1029,8 +1059,8 @@ try {
   if (!drill.checks?.some((check) => check.id === "agent_leases" && check.status === "warn")) {
     throw new Error(`takeover drill endpoint missing stale agent lease warning: ${JSON.stringify(drill.checks)}`);
   }
-  if (drill.nextAgentBrief?.interruptedWork?.status !== "clear") {
-    throw new Error(`takeover drill should distinguish stale lease from unresolved interrupted work: ${JSON.stringify(drill.nextAgentBrief?.interruptedWork)}`);
+  if (drill.nextAgentBrief?.interruptedWork?.status !== "suspected_interruption" || !drill.nextAgentBrief?.interruptedWork?.items?.some((item) => item.leaseStatus === "stale")) {
+    throw new Error(`takeover drill should surface stale interrupted work risk: ${JSON.stringify(drill.nextAgentBrief?.interruptedWork)}`);
   }
   const drillCli = spawnSync("node", ["server/takeover-drill-cli.js", "--project-dir", projectDir, "--json"], { encoding: "utf8" });
   if (drillCli.status !== 0) throw new Error(`takeover drill cli failed: ${drillCli.stderr || drillCli.stdout}`);
@@ -1128,20 +1158,11 @@ try {
   if (gitSmokeInitialized && (!autoPromptMarkdown.includes("- git:") || !autoPromptMarkdown.includes("dirty tree:"))) {
     throw new Error("auto next-agent prompt did not include git freshness details");
   }
-  if (!autoContextPromptMarkdown.includes("Bundle-Only Next Agent Starter Prompt") || !autoContextPromptMarkdown.includes(watchedRelPath) || !autoContextPromptMarkdown.includes("## Bundle Gate") || !autoContextPromptMarkdown.includes("## Attention Pack") || !autoContextPromptMarkdown.includes("## Phase Ledger") || !autoContextPromptMarkdown.includes("## Decision Ledger") || !autoContextPromptMarkdown.includes("## Temporal Provenance") || !autoContextPromptMarkdown.includes("## State Boundary") || !autoContextPromptMarkdown.includes("## Code Graph") || !autoContextPromptMarkdown.includes("## Hook Ingress") || !autoContextPromptMarkdown.includes("## Objective Coverage") || !autoContextPromptMarkdown.includes("Development trail:")) {
-    throw new Error("auto context-starter prompt did not include bundle-only takeover instructions or watched architecture change");
+  if (!autoContextPromptMarkdown.includes("Takeover Starter Prompt") || !autoContextPromptMarkdown.includes("## Takeover Gate") || !autoContextPromptMarkdown.includes("## Current State") || !autoContextPromptMarkdown.includes("## Next Step") || !autoContextPromptMarkdown.includes("## Memory Budget") || !autoContextPromptMarkdown.includes("## On-Demand Reads")) {
+    throw new Error("auto context-starter prompt did not include summary-first takeover instructions");
   }
-  if (!autoContextPromptMarkdown.includes("## Checkpoint Ledger")) {
-    throw new Error("auto context-starter prompt did not include checkpoint ledger");
-  }
-  if (!autoContextPromptMarkdown.includes("packed files:") || !autoContextPromptMarkdown.includes("omitted refs:")) {
-    throw new Error("auto context-starter prompt did not include prompt packing details");
-  }
-  if (!autoContextPromptMarkdown.includes("backpressure:")) {
-    throw new Error("auto context-starter prompt did not include hook backpressure details");
-  }
-  if (gitSmokeInitialized && (!autoContextPromptMarkdown.includes("- git:") || !autoContextPromptMarkdown.includes("dirty tree:"))) {
-    throw new Error("auto context-starter prompt did not include git freshness details");
+  if (!autoContextPromptMarkdown.includes(".project-agent/takeover-summary.json") || !autoContextPromptMarkdown.includes(".project-agent/agent-context-bundle.json")) {
+    throw new Error("auto context-starter prompt did not include summary/bundle refs");
   }
   if (autoContextDrill.schemaVersion !== "project-agent.context-takeover-drill.v1" || !autoContextDrill.firstActions?.length || !autoContextDrill.checks?.some((check) => check.id === "bundle_verified")) {
     throw new Error(`auto context takeover drill did not include bundle-only rehearsal: ${JSON.stringify(autoContextDrill)}`);
@@ -1303,19 +1324,43 @@ try {
   if (finalInsights.continuity?.hookIngressAudit?.backpressure?.schemaVersion !== "project-agent.hook-backpressure-audit.v1" || finalInsights.continuity?.hookIngressAudit?.saturatedAttempts < 1) {
     throw new Error(`continuity missing final hook backpressure audit: ${JSON.stringify(finalInsights.continuity?.hookIngressAudit)}`);
   }
-  if (finalInsights.continuity?.agentContextBundle?.schemaVersion !== "project-agent.context-bundle.v1" || !finalInsights.continuity?.agentContextBundle?.validation?.stateManifestVerification?.ok || !finalInsights.continuity?.agentContextBundle?.validation?.agentContextBundleVerification?.canResume || finalInsights.continuity?.agentContextBundle?.architecture?.codeGraph?.schemaVersion !== "project-agent.code-graph.v1" || finalInsights.continuity?.agentContextBundle?.validation?.disclosureGate?.schemaVersion !== "project-agent.disclosure-gate.v1" || finalInsights.continuity?.agentContextBundle?.validation?.freshnessGate?.schemaVersion !== "project-agent.freshness-gate.v1" || finalInsights.continuity?.agentContextBundle?.validation?.phaseLedger?.schemaVersion !== "project-agent.phase-ledger.v1" || finalInsights.continuity?.agentContextBundle?.validation?.decisionLedger?.schemaVersion !== "project-agent.decision-ledger.v1" || finalInsights.continuity?.agentContextBundle?.validation?.stateBoundary?.schemaVersion !== "project-agent.state-boundary-audit.v1" || finalInsights.continuity?.agentContextBundle?.validation?.runtimeEval?.schemaVersion !== "project-agent.runtime-eval.v1" || finalInsights.continuity?.agentContextBundle?.validation?.hookIngressAudit?.schemaVersion !== "project-agent.hook-ingress-audit.v1" || finalInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.schemaVersion !== "project-agent.provenance-ledger.v1" || !finalInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.claims?.some((claim) => claim.id === "state_manifest") || !finalInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.claims?.some((claim) => claim.id === "phase_ledger") || !finalInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.claims?.some((claim) => claim.id === "decision_ledger") || !finalInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.claims?.some((claim) => claim.id === "state_boundary") || !finalInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.claims?.some((claim) => claim.id === "code_graph") || !finalInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.claims?.some((claim) => claim.id === "hook_ingress") || finalInsights.continuity?.agentContextBundle?.validation?.attentionPack?.schemaVersion !== "project-agent.attention-pack.v1" || !finalInsights.continuity?.agentContextBundle?.validation?.attentionPack?.items?.some((item) => item.id === "phase_ledger") || !finalInsights.continuity?.agentContextBundle?.validation?.attentionPack?.items?.some((item) => item.id === "decision_ledger") || !finalInsights.continuity?.agentContextBundle?.validation?.attentionPack?.items?.some((item) => item.id === "state_boundary") || !finalInsights.continuity?.agentContextBundle?.validation?.attentionPack?.items?.some((item) => item.id === "code_graph") || !finalInsights.continuity?.agentContextBundle?.validation?.attentionPack?.items?.some((item) => item.id === "hook_ingress") || finalInsights.continuity?.agentContextBundle?.validation?.preEditRisk?.schemaVersion !== "project-agent.pre-edit-risk.v1" || finalInsights.continuity?.agentContextBundle?.handoff?.lifecycle?.schemaVersion !== "project-agent.handoff-lifecycle.v1") {
-    throw new Error(`continuity missing visible agent context bundle: ${JSON.stringify(finalInsights.continuity?.agentContextBundle)}`);
+  const finalBundle = finalInsights.continuity?.agentContextBundle || {};
+  const finalValidation = finalBundle.validation || {};
+  const finalAttentionIds = new Set((finalValidation.attentionPack?.items || []).map((item) => item.id));
+  const finalClaimIds = new Set((finalValidation.provenanceLedger?.claims || []).map((claim) => claim.id));
+  const finalCodeGraphSchema = finalBundle.architecture?.codeGraph?.schemaVersion;
+  const requiredClaims = ["state_manifest", "phase_ledger", "decision_ledger", "state_boundary", "code_graph", "hook_ingress"];
+  const bundleFailures = [
+    finalBundle.schemaVersion !== "project-agent.context-bundle.v1" ? "bundle_schema" : "",
+    !finalValidation.stateManifestVerification?.ok ? "state_manifest_verification" : "",
+    !finalValidation.agentContextBundleVerification?.canResume ? "bundle_verification" : "",
+    !["project-agent.code-graph.v1", "project-agent.code-graph-summary.v1"].includes(finalCodeGraphSchema) ? "code_graph_schema" : "",
+    finalValidation.disclosureGate?.schemaVersion !== "project-agent.disclosure-gate.v1" ? "disclosure_gate" : "",
+    finalValidation.freshnessGate?.schemaVersion !== "project-agent.freshness-gate.v1" ? "freshness_gate" : "",
+    finalValidation.phaseLedger?.schemaVersion !== "project-agent.phase-ledger.v1" ? "phase_ledger" : "",
+    finalValidation.decisionLedger?.schemaVersion !== "project-agent.decision-ledger.v1" ? "decision_ledger" : "",
+    finalValidation.stateBoundary?.schemaVersion !== "project-agent.state-boundary-audit.v1" ? "state_boundary" : "",
+    finalValidation.runtimeEval?.schemaVersion !== "project-agent.runtime-eval.v1" ? "runtime_eval" : "",
+    finalValidation.hookIngressAudit?.schemaVersion !== "project-agent.hook-ingress-audit.v1" ? "hook_ingress" : "",
+    finalValidation.provenanceLedger?.schemaVersion !== "project-agent.provenance-ledger.v1" ? "provenance_ledger" : "",
+    !requiredClaims.every((id) => finalClaimIds.has(id)) ? `claims:${requiredClaims.filter((id) => !finalClaimIds.has(id)).join(",")}` : "",
+    finalValidation.attentionPack?.schemaVersion !== "project-agent.attention-pack.v1" || !finalAttentionIds.size ? "attention_pack" : "",
+    finalValidation.preEditRisk?.schemaVersion !== "project-agent.pre-edit-risk.v1" ? "pre_edit_risk" : "",
+    finalBundle.handoff?.lifecycle?.schemaVersion !== "project-agent.handoff-lifecycle.v1" ? "handoff_lifecycle" : ""
+  ].filter(Boolean);
+  if (bundleFailures.length) {
+    throw new Error(`continuity missing visible agent context bundle (${bundleFailures.join(", ")}): ${JSON.stringify(finalInsights.continuity?.agentContextBundle)}`);
   }
-  if (finalInsights.continuity?.agentContextBundle?.validation?.temporalProvenance?.schemaVersion !== "project-agent.temporal-provenance-audit.v1" || !finalInsights.continuity?.agentContextBundle?.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "temporal_provenance") || !finalInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.claims?.some((claim) => claim.id === "temporal_provenance") || !finalInsights.continuity?.agentContextBundle?.validation?.attentionPack?.items?.some((item) => item.id === "temporal_provenance")) {
+  if (finalInsights.continuity?.agentContextBundle?.validation?.temporalProvenance?.schemaVersion !== "project-agent.temporal-provenance-audit.v1" || !finalInsights.continuity?.agentContextBundle?.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "temporal_provenance") || !finalInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.claims?.some((claim) => claim.id === "temporal_provenance")) {
     throw new Error(`agent context bundle missing temporal provenance provenance/attention: ${JSON.stringify(finalInsights.continuity?.agentContextBundle?.validation?.temporalProvenance)}`);
   }
   if (finalInsights.continuity?.agentContextBundle?.validation?.disclosureGate?.packing?.schemaVersion !== "project-agent.prompt-packing-gate.v1" || !finalInsights.continuity?.agentContextBundle?.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "prompt_packing_gate")) {
     throw new Error(`agent context bundle missing prompt packing gate: ${JSON.stringify(finalInsights.continuity?.agentContextBundle?.validation?.disclosureGate)}`);
   }
-  if (finalInsights.continuity?.agentContextBundle?.validation?.checkpointLedger?.schemaVersion !== "project-agent.checkpoint-ledger.v1" || !finalInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.claims?.some((claim) => claim.id === "checkpoint_ledger") || !finalInsights.continuity?.agentContextBundle?.validation?.attentionPack?.items?.some((item) => item.id === "checkpoint_ledger")) {
+  if (finalInsights.continuity?.agentContextBundle?.validation?.checkpointLedger?.schemaVersion !== "project-agent.checkpoint-ledger.v1" || !finalInsights.continuity?.agentContextBundle?.validation?.provenanceLedger?.claims?.some((claim) => claim.id === "checkpoint_ledger")) {
     throw new Error(`agent context bundle missing checkpoint ledger provenance/attention: ${JSON.stringify(finalInsights.continuity?.agentContextBundle?.validation?.checkpointLedger)}`);
   }
-  if (finalInsights.continuity?.agentContextBundle?.process?.developmentTrail?.schemaVersion !== "project-agent.development-trail.v1" || !finalInsights.continuity?.agentContextBundle?.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "development_trail")) {
+  if (!["project-agent.development-trail.v1", "project-agent.development-trail-summary.v1"].includes(finalInsights.continuity?.agentContextBundle?.process?.developmentTrail?.schemaVersion) || !finalInsights.continuity?.agentContextBundle?.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "development_trail")) {
     throw new Error(`agent context bundle missing verified development trail: ${JSON.stringify(finalInsights.continuity?.agentContextBundle?.process?.developmentTrail)}`);
   }
   if (finalInsights.continuity?.takeoverAcceptanceAudit?.schemaVersion !== "project-agent.takeover-acceptance-audit.v1" || !finalInsights.continuity?.takeoverAcceptanceAudit?.rows?.some((row) => row.id === "memory_visible_knowledge_graph") || !finalInsights.continuity?.agentContextBundle?.validation?.agentContextBundleVerification?.checks?.some((check) => check.id === "takeover_acceptance_audit")) {

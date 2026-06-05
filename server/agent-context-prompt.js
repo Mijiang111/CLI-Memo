@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { readAgentContextBundle, verifyAgentContextBundle } from "./runtime-state.js";
+import { buildTakeoverSummary, readAgentContextBundle, readTakeoverSummary, verifyAgentContextBundle } from "./runtime-state.js";
 
 function compact(value, max = 600) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
@@ -17,6 +17,73 @@ function renderCursor(cursor = {}) {
   if (!cursor?.title) return "- none";
   const refs = cursor.refs?.length ? `\n- refs: ${cursor.refs.slice(0, 8).join(", ")}` : "";
   return `- [${cursor.phase || "event"}/${cursor.status || "unknown"}] ${cursor.title}\n- detail: ${compact(cursor.detail, 500)}${refs}`;
+}
+
+function renderTakeoverSummaryPrompt(summary = {}, verification = {}) {
+  const goal = summary.activeGoal || {};
+  const current = summary.currentState || {};
+  const next = summary.nextStep || {};
+  const takeover = summary.takeover || {};
+  const budgetLines = Object.entries(summary.budgets || {}).map(([name, budget]) => {
+    const status = budget?.status || "unknown";
+    const tokens = budget?.actual?.estimatedTokens ?? budget?.estimatedTokens ?? 0;
+    const maxTokens = budget?.limits?.maxTokens ?? budget?.maxTokens ?? 0;
+    const source = budget?.sourceRef || "source ref missing";
+    return `- ${name}: ${status}, ${tokens}/${maxTokens} token estimate, source \`${source}\``;
+  });
+  return [
+    "# Takeover Starter Prompt",
+    "",
+    "You are taking over this project from `.project-agent/takeover-summary.json`. Do not read full `agent-context-bundle.json` or `continuity.json` first; use the on-demand reads below when detail is needed.",
+    "",
+    "## Takeover Gate",
+    "",
+    `- status: ${takeover.status || "unknown"}`,
+    `- can take over: ${takeover.canTakeOver ? "yes" : "no"}`,
+    `- summary: ${takeover.summary || verification.summary || "No takeover summary."}`,
+    takeover.blockers?.length ? `- blockers: ${takeover.blockers.join(", ")}` : "- blockers: none",
+    takeover.warnings?.length ? `- warnings: ${takeover.warnings.join(", ")}` : "- warnings: none",
+    "",
+    "## Mission",
+    "",
+    goal.objective || "Continue the active project goal from durable project files.",
+    "",
+    "## Current State",
+    "",
+    current.title
+      ? `- [${current.phase || "event"}/${current.status || "unknown"}] ${current.title}\n- detail: ${compact(current.detail, 420)}`
+      : "- No current state is available; inspect `.project-agent/process-trace.json#current`.",
+    current.refs?.length ? `- refs: ${current.refs.slice(0, 8).join(", ")}` : "",
+    "",
+    "## Next Step",
+    "",
+    next.command ? `- command: \`${next.command}\`` : "- command: inspect the takeover packet and process trace before editing",
+    next.expected?.title ? `- expected: [${next.expected.phase}/${next.expected.status}] ${next.expected.title}` : "",
+    "",
+    "## Risks",
+    "",
+    listLines((summary.risks || []).slice(0, 6), (risk) => `- [${risk.tone || "watch"}] ${risk.id}: ${risk.summary}${risk.refs?.length ? ` refs=${risk.refs.slice(0, 5).join(", ")}` : ""}`),
+    "",
+    "## Memory Budget",
+    "",
+    budgetLines.length ? budgetLines.join("\n") : "- no budget report",
+    "",
+    "## On-Demand Reads",
+    "",
+    listLines((summary.onDemandReads || []).slice(0, 8), (item) => `- ${item.label}: \`${item.command}\``),
+    "",
+    "## Source Refs",
+    "",
+    listLines((summary.sourceRefs || []).slice(0, 10), (item) => `- \`${item.path}\`: ${item.reason || "source"}`),
+    "",
+    "## First Actions",
+    "",
+    "1. Verify `takeover.status` and resolve blockers before editing.",
+    "2. Resume from the current state, not from prior chat.",
+    "3. Use the on-demand `jq` reads for missing detail.",
+    "4. Record a fresh current event before the next tool call, then record done/failed/blocked afterward.",
+    ""
+  ].filter((line) => line !== undefined && line !== null).join("\n");
 }
 
 export function renderAgentContextPrompt(bundle, verification = verifyAgentContextBundle("", bundle)) {
@@ -316,9 +383,10 @@ export function renderAgentContextPrompt(bundle, verification = verifyAgentConte
 export function buildAgentContextPrompt(projectDir, options = {}) {
   const bundle = options.bundle || readAgentContextBundle(projectDir);
   const verification = options.verification || verifyAgentContextBundle(projectDir, bundle);
-  const markdown = renderAgentContextPrompt(bundle || {}, verification);
+  const summary = options.summary || readTakeoverSummary(projectDir) || buildTakeoverSummary(projectDir, undefined, { bundle, verification });
+  const markdown = renderTakeoverSummaryPrompt(summary || {}, verification);
   const file = options.writeFile ? writeAgentContextPromptFile(projectDir, markdown) : undefined;
-  return { markdown, file, agentContextBundle: bundle, verification };
+  return { markdown, file, takeoverSummary: summary, agentContextBundle: bundle, verification };
 }
 
 export function writeAgentContextPromptFile(projectDir, markdown) {

@@ -1,8 +1,16 @@
 # Project Agent Terminal 产品开发日志
 
 日期：2026-06-05  
-最新本地提交：`feat: add temporal provenance audit`（以 `git log` 为准）  
-当前状态：Temporal Provenance Audit 已实现、验证并本地提交；远端 `origin` 尚未配置，暂不能 push 到 GitHub。
+最新本地提交：`feat: add summary-first takeover and cli terminal bridge`（以 `git log` 为准）  
+当前状态：Summary-first takeover、grep-first retrieval、CLI Agent terminal bridge 已实现并验证；远端 `origin` 尚未配置，暂不能 push 到 GitHub。
+
+更新：接手协议已从“把大包塞给模型”改为 summary-first。`.project-agent/takeover-summary.json` 成为默认入口，`agent-context-bundle.json` 改为预算化索引；memory/process/architecture/handoff 超预算时只披露摘要、hash 和 source refs，由接手 agent 按需读取。
+
+更新：新增 grep-first retrieval 层。`npm run grep-context`、`/api/context-search` 和 `/api/context-read` 提供本地、零模型、refs-first 的检索路径，让 agent 像用 RAG 一样先检索命中片段，再按 ref 读取原文。
+
+更新：CLI Agent 入口回到 terminal 本身。产品不再在右侧提供 Codex smoke 按钮；右侧保持 Goal / State / Next / Risk / Resume、Audit、Handoff。真实 Codex 或其他 CLI Agent 应直接在 terminal 中运行，terminal 后端负责提供真实 TTY。
+
+更新：terminal 后端新增 Python PTY bridge fallback。当前机器上 `node-pty` 会报 `posix_spawnp failed`，旧 fallback 是普通 pipe，导致 `codex` 报 `stdin is not a terminal`。现在 fallback 会启动 Python PTY bridge，让 `sys.stdin.isatty()` 返回 `True`，`codex --version` 可在产品 terminal 中正常输出。
 
 更新：State Boundary Audit 已落地到 continuity、continuity contract、agent context bundle validation、provenance ledger、attention pack、starter prompts、Handoff UI 和 smoke tests。它把 raw events、durable sources、derived indexes、disclosure outputs 明确分层，避免把 prompt/resume/graph index 误当成唯一真相。
 
@@ -128,16 +136,45 @@ Benchmark 结论已经沉淀在 `docs/research/agent-governance-landscape.md`。
 
 产品价值：接手 agent 不只知道“这个说法来自哪里”，还知道“这个说法什么时候观察到、什么时候仍然有效、是否被后续变更变成 stale/watch/invalid”。这把 handoff 从 evidence-backed 推进到 time-aware。
 
+### 11. Summary-first Takeover 与 Budgeted Context
+
+根据 benchmark 中 prompt packing 和 durable handoff 的共同问题，接手协议改为 summary-first：
+
+- `.project-agent/takeover-summary.json` 成为默认接手包。
+- `agent-context-bundle.json` 改成预算化索引，超预算内容只保留摘要、hash 和 source refs。
+- `npm run context` 默认输出 summary，`--full` 才输出完整 bundle。
+- README、AGENTS、resume、recovery、smoke test 都同步成 summary-first 协议。
+
+产品价值：下一个 agent 的冷启动不再依赖大上下文注入，而是先读小摘要，再按 refs 钻取。成本、延迟和上下文爆炸风险都更可控。
+
+### 12. Grep-first Retrieval 与 CLI Agent Terminal
+
+根据用户提出的 grep 架构方向，新增本地检索式上下文读取：
+
+- `server/grep-context.js` 提供 project-local search/read 能力。
+- `npm run grep-context` 可按 query 搜索 source refs，也可按 `file:line-line` 读取片段。
+- `/api/context-search` 和 `/api/context-read` 提供同等 API 能力。
+- `npm run cli-agent` 生成 CLI Agent bootstrap prompt；`--launch` 可直接启动 Codex CLI。
+- terminal 后端新增 Python PTY bridge，确保 CLI Agent 拿到真实 TTY。
+
+产品价值：Project Agent Terminal 的“记忆”不再只是把状态压缩给模型，而是形成 grep-first、refs-first、on-demand reads 的本地检索协议。terminal 仍是所有 CLI Agent 的执行入口，避免把 agent 启动做成额外 UI 按钮。
+
 ## 四、当前验证状态
 
-上一轮完成后已验证：
+当前版本已验证：
 
 - `node --check` 通过相关 server 文件。
 - `npm run build` 通过，只有 Vite chunk size warning。
-- `PORT=4176 npm test` 通过，输出 `smoke ok`。
-- smoke test 覆盖 bundle endpoint、CLI、prompt 文件、final insights、UI source checks、hook backpressure、prompt packing gate、state boundary audit、git freshness audit、temporal provenance audit。
+- `PORT=4159 npm test` 通过，输出 `smoke ok`。
+- `npm run grep-context -- --project-dir demo-project --query "grep-first takeover codex terminal" --limit 5` 通过。
+- `npm run cli-agent -- --project-dir demo-project` 通过，生成 `.project-agent/cli-agent-bootstrap.md` 和 Codex 启动命令。
+- 产品 terminal 后端显示 `connected / python-pty`。
+- 产品 terminal 中 `python3 -c "import sys; print(sys.stdin.isatty())"` 输出 `True`。
+- 产品 terminal 中 `codex --version` 输出 `codex-cli 0.136.0`。
+- Browser QA 确认右侧不再显示 `Smoke` action button，terminal 仍显示 `python-pty`。
+- smoke test 覆盖 bundle endpoint、CLI、prompt 文件、final insights、UI source checks、hook backpressure、prompt packing gate、state boundary audit、git freshness audit、temporal provenance audit、summary-first takeover、grep-first retrieval 和 terminal backend fallback。
 - `.project-agent` 在 smoke 后没有残留。
-- `4176` 端口没有遗留 listener。
+- `4159` 测试端口没有遗留 listener。
 
 ## 五、当前 git 状态
 
@@ -148,7 +185,9 @@ Benchmark 结论已经沉淀在 `docs/research/agent-governance-landscape.md`。
 已完成本地提交链：
 
 ```text
-current HEAD feat: add temporal provenance audit
+current HEAD feat: add summary-first takeover and cli terminal bridge
+f57f460 fix: restore sidecar code graph binding
+913e785 feat: add temporal provenance audit
 caf860a docs: update product development log
 8432ebc feat: add git freshness audit
 2612546 feat: add state boundary audit

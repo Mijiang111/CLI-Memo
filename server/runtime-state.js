@@ -16,6 +16,7 @@ const TAKEOVER_ACCEPTANCE_AUDIT_FILE = "takeover-acceptance-audit.json";
 const GOVERNANCE_SPEC_FILE = "governance-spec.json";
 const STATE_MANIFEST_FILE = "state-manifest.json";
 const AGENT_CONTEXT_BUNDLE_FILE = "agent-context-bundle.json";
+const TAKEOVER_SUMMARY_FILE = "takeover-summary.json";
 const MAX_EVENTS = 120;
 const MAX_AGENTS = 30;
 const MAX_HOOK_INGRESSES = 80;
@@ -76,6 +77,14 @@ const DISCLOSURE_SECRET_RULES = [
 const DISCLOSURE_SAFE_VALUES = new Set(["redacted", "placeholder", "example", "change_me", "changeme", "undefined", "null", "none"]);
 const SECRET_KEY_RE = /password|passwd|pwd|api[_-]?key|secret|token|auth[_-]?token|access[_-]?token|private[_-]?key/i;
 const ATTENTION_PACK_TOKEN_BUDGET = 1800;
+const TAKEOVER_SUMMARY_TOKEN_BUDGET = 1800;
+const TAKEOVER_SUMMARY_BYTE_BUDGET = 14000;
+const SECTION_BUDGETS = {
+  memory: { maxTokens: 1800, maxBytes: 18000, sourceRef: ".project-agent/memory-graph.json", jq: "{nodeCount,edgeCount,provenanceCoverage,nodes:.nodes[0:12],edges:.edges[0:16],provenanceRefs:.provenanceRefs[0:12]}" },
+  process: { maxTokens: 1800, maxBytes: 18000, sourceRef: ".project-agent/process-trace.json", jq: "{current,previous,next,phases:.phases[0:8],recentEvents:.events[0:8],inspectOrder:.inspectOrder[0:12]}" },
+  architecture: { maxTokens: 2200, maxBytes: 24000, sourceRef: ".project-agent/architecture-map.json", jq: "{totals,impact,recentChanges:.recentChanges[0:12],inspectOrder:.inspectOrder[0:16],codeGraph:{status,nodeCount,edgeCount,hotspots:.hotspots[0:8],changedImpact:.changedImpact[0:8]}}" },
+  handoff: { maxTokens: 1600, maxBytes: 16000, sourceRef: ".project-agent/takeover-packet.json", jq: "{status,canResume,objective,cursor,nextCommand,firstActions:.firstActions[0:5],firstRead:.firstRead[0:8],guardrails:.guardrails[0:8]}" }
+};
 const DISCLOSURE_IGNORED_KEYS = new Set([
   "agentContextBundleVerification",
   "disclosureGate",
@@ -152,7 +161,13 @@ function agentContextBundlePath(projectDir) {
   return path.join(stateDir(projectDir), AGENT_CONTEXT_BUNDLE_FILE);
 }
 
+function takeoverSummaryPath(projectDir) {
+  return path.join(stateDir(projectDir), TAKEOVER_SUMMARY_FILE);
+}
+
 const MANIFEST_FILES = [
+  TAKEOVER_SUMMARY_FILE,
+  AGENT_CONTEXT_BUNDLE_FILE,
   GOVERNANCE_SPEC_FILE,
   CONTRACT_FILE,
   AGENT_RUNBOOK_FILE,
@@ -163,6 +178,7 @@ const MANIFEST_FILES = [
   TAKEOVER_PACKET_FILE,
   CONTINUITY_AUDIT_FILE,
   TAKEOVER_ACCEPTANCE_AUDIT_FILE,
+  "codex-takeover-smoke.json",
   "next-agent-prompt.md",
   CONTINUITY_FILE,
   "resume.md",
@@ -170,7 +186,14 @@ const MANIFEST_FILES = [
   "state.json",
   RUNTIME_FILE
 ];
-const VOLATILE_MANIFEST_PATHS = new Set([`.project-agent/${RUNTIME_FILE}`, `.project-agent/${TAKEOVER_ACCEPTANCE_AUDIT_FILE}`]);
+const VOLATILE_MANIFEST_PATHS = new Set([
+  `.project-agent/${RUNTIME_FILE}`,
+  `.project-agent/${STATE_MANIFEST_FILE}`,
+  `.project-agent/${AGENT_CONTEXT_BUNDLE_FILE}`,
+  `.project-agent/${TAKEOVER_SUMMARY_FILE}`,
+  `.project-agent/${TAKEOVER_ACCEPTANCE_AUDIT_FILE}`,
+  ".project-agent/codex-takeover-smoke.json"
+]);
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -827,13 +850,19 @@ function buildProvenanceLedger(bundle = {}) {
   const lifecycle = bundle.handoff?.lifecycle || {};
   const objectiveCoverage = bundle.validation?.objectiveCoverage || {};
   const takeoverAcceptance = bundle.validation?.takeoverAcceptanceAudit || {};
+  const memoryGraph = bundle.memory?.graph || {};
+  const memoryNodeCount = memoryGraph.nodeCount || memoryGraph.nodes?.length || 0;
+  const memoryEdgeCount = memoryGraph.edgeCount || memoryGraph.edges?.length || 0;
+  const architectureMap = bundle.architecture?.map || {};
+  const architectureFileCount = architectureMap.totals?.files || architectureMap.files?.length || 0;
+  const architectureChangedCount = bundle.architecture?.changedFiles?.length || architectureMap.recentChanges?.length || architectureMap.totals?.changed || 0;
   const claims = [
     provenanceClaim(
       "memory_graph",
       "Memory Graph",
-      bundle.memory?.graph?.nodes?.length && bundle.memory?.graph?.edges?.length ? "ok" : "warn",
-      `${bundle.memory?.graph?.nodes?.length || 0} node(s), ${bundle.memory?.graph?.edges?.length || 0} edge(s), provenance ${bundle.memory?.graph?.provenanceCoverage || "unknown"}.`,
-      [".project-agent/memory-graph.json", ".project-agent/state.json", ...(bundle.memory?.graph?.provenanceRefs || []).slice(0, 6)]
+      memoryNodeCount && (memoryEdgeCount || bundle.memory?.budget?.sourceRef) ? "ok" : "warn",
+      `${memoryNodeCount} node(s), ${memoryEdgeCount} edge(s), provenance ${memoryGraph.provenanceCoverage || "unknown"}.`,
+      [".project-agent/memory-graph.json", ".project-agent/state.json", ...(memoryGraph.provenanceRefs || []).slice(0, 6)]
     ),
     provenanceClaim(
       "process_trace",
@@ -846,10 +875,10 @@ function buildProvenanceLedger(bundle = {}) {
     provenanceClaim(
       "architecture_map",
       "Architecture Map",
-      bundle.architecture?.map?.files?.length ? "ok" : "bad",
-      `${bundle.architecture?.map?.files?.length || 0} architecture file(s), ${bundle.architecture?.changedFiles?.length || 0} changed file(s).`,
+      architectureFileCount ? "ok" : "bad",
+      `${architectureFileCount} architecture file(s), ${architectureChangedCount} changed file(s).`,
       [".project-agent/architecture-map.json", ...(bundle.architecture?.changedFiles || []).slice(0, 8).map((file) => file.path)],
-      { observedAt: bundle.architecture?.map?.scannedAt || bundle.architecture?.trace?.scannedAt || null }
+      { observedAt: architectureMap.scannedAt || bundle.architecture?.trace?.scannedAt || null }
     ),
     provenanceClaim(
       "code_graph",
@@ -1079,30 +1108,539 @@ export function buildDisclosureGate(bundle, options = {}) {
   };
 }
 
+function jsonText(value) {
+  try {
+    return JSON.stringify(value ?? null);
+  } catch {
+    return JSON.stringify(String(value ?? ""));
+  }
+}
+
+function sectionBudget(section, value, budget = {}) {
+  const text = jsonText(value);
+  const bytes = Buffer.byteLength(text, "utf8");
+  const estimatedTokens = estimateDisclosureTokens(text);
+  const maxBytes = Number(budget.maxBytes || 0);
+  const maxTokens = Number(budget.maxTokens || 0);
+  const overBytes = Boolean(maxBytes && bytes > maxBytes);
+  const overTokens = Boolean(maxTokens && estimatedTokens > maxTokens);
+  return {
+    schemaVersion: "project-agent.memory-budget.v1",
+    section,
+    status: overBytes || overTokens ? "summary_only" : "inline",
+    sourceRef: budget.sourceRef || null,
+    contentHash: sha256(text),
+    limits: { maxBytes, maxTokens },
+    actual: {
+      bytes,
+      estimatedTokens,
+      byteUtilization: maxBytes ? Number((bytes / maxBytes).toFixed(2)) : 0,
+      tokenUtilization: maxTokens ? Number((estimatedTokens / maxTokens).toFixed(2)) : 0
+    },
+    omitted: overBytes || overTokens ? { reason: overBytes ? "max_bytes" : "max_tokens", bytes, estimatedTokens } : null,
+    read: budget.sourceRef
+      ? {
+          command: `jq '${budget.jq || "."}' ${budget.sourceRef}`,
+          api: `/api/context-read?ref=${encodeURIComponent(budget.sourceRef)}`
+        }
+      : null
+  };
+}
+
+function eventSummary(event = {}) {
+  if (!event) return null;
+  return {
+    id: event.id || null,
+    at: event.at || event.startedAt || null,
+    phase: event.phase || "event",
+    status: event.status || "unknown",
+    title: event.title || null,
+    detail: compact(event.detail || event.summary || "", 280),
+    refs: (event.refs || []).slice(0, 8),
+    files: (event.files || []).slice(0, 6).map((file) => ({
+      path: file.path,
+      status: file.status,
+      kind: file.kind,
+      summary: file.summary
+    }))
+  };
+}
+
+function memoryGraphSummary(graph = {}, budget = null) {
+  if (!graph) return null;
+  const nodes = graph.nodes || [];
+  const edges = graph.edges || [];
+  return {
+    schemaVersion: "project-agent.memory-graph-summary.v1",
+    status: nodes.length ? "available" : "missing",
+    nodeCount: graph.nodeCount || nodes.length || 0,
+    edgeCount: graph.edgeCount || edges.length || 0,
+    provenanceCoverage: graph.provenanceCoverage || "unknown",
+    summary: graph.summary || `${graph.nodeCount || nodes.length || 0} node(s), ${graph.edgeCount || edges.length || 0} edge(s).`,
+    nodes: nodes.slice(0, 12).map((node) => ({
+      id: node.id,
+      label: node.label || node.title || node.id,
+      kind: node.kind || node.type,
+      status: node.status,
+      detail: compact(node.detail || node.summary || node.description || "", 220),
+      provenance: (node.provenance || node.refs || []).slice?.(0, 4) || []
+    })),
+    edges: edges.slice(0, 16).map((edge) => ({
+      source: edge.source,
+      target: edge.target,
+      label: edge.label || edge.relation || edge.type,
+      refs: (edge.refs || edge.provenance || []).slice?.(0, 4) || []
+    })),
+    provenanceRefs: (graph.provenanceRefs || []).slice(0, 12),
+    sourceRef: ".project-agent/memory-graph.json",
+    budget
+  };
+}
+
+function processTraceSummary(trace = {}, recentEvents = [], budget = null) {
+  if (!trace) return null;
+  return {
+    schemaVersion: "project-agent.process-trace-summary.v1",
+    status: trace.current ? "available" : "missing",
+    current: eventSummary(trace.current),
+    previous: eventSummary(trace.previous),
+    next: eventSummary(trace.next),
+    workstream: trace.workstream || null,
+    phaseCount: trace.phases?.length || 0,
+    eventCount: trace.events?.length || recentEvents.length || 0,
+    phases: (trace.phases || []).slice(0, 8).map((phase) => ({
+      id: phase.id,
+      phase: phase.phase || phase.label,
+      status: phase.status,
+      title: phase.title,
+      refs: (phase.refs || []).slice?.(0, 4) || []
+    })),
+    recentEvents: (trace.events || recentEvents || []).slice(0, 8).map(eventSummary).filter(Boolean),
+    inspectOrder: (trace.inspectOrder || []).slice(0, 12),
+    sourceRef: ".project-agent/process-trace.json",
+    budget
+  };
+}
+
+function developmentTrailSummary(trail = {}, budget = null) {
+  if (!trail) return null;
+  return {
+    schemaVersion: "project-agent.development-trail-summary.v1",
+    status: trail.status || "unknown",
+    summary: trail.summary || null,
+    current: trail.current || null,
+    fileCoverage: trail.fileCoverage || null,
+    steps: (trail.steps || []).slice(0, 8).map((step) => ({
+      id: step.id,
+      label: step.label || step.phase,
+      status: step.status,
+      title: step.title,
+      risk: step.risk,
+      files: (step.files || []).slice(0, 6).map((file) => ({ path: file.path, status: file.status, kind: file.kind })),
+      folders: (step.folders || []).slice(0, 4).map((folder) => ({ folder: folder.folder, summary: folder.summary })),
+      nextAction: step.nextAction
+    })),
+    inspectOrder: (trail.inspectOrder || []).slice(0, 12),
+    sourceRef: ".project-agent/development-trail.json",
+    budget
+  };
+}
+
+function codeGraphSummary(graph = {}, budget = null) {
+  if (!graph) return null;
+  return {
+    schemaVersion: "project-agent.code-graph-summary.v1",
+    status: graph.status || "unknown",
+    nodeCount: graph.nodeCount || graph.nodes?.length || 0,
+    edgeCount: graph.edgeCount || graph.edges?.length || 0,
+    localEdgeCount: graph.localEdgeCount || 0,
+    packageEdgeCount: graph.packageEdgeCount || 0,
+    unresolvedEdgeCount: graph.unresolvedEdgeCount || 0,
+    summary: graph.summary || null,
+    hotspots: (graph.hotspots || []).slice(0, 8),
+    changedImpact: (graph.changedImpact || []).slice(0, 8).map((item) => ({
+      path: item.path,
+      dependents: (item.dependents || []).slice(0, 6),
+      dependencies: (item.dependencies || []).slice(0, 6),
+      nextAction: item.nextAction
+    })),
+    warnings: (graph.warnings || []).slice(0, 8),
+    sourceRef: ".project-agent/architecture-map.json#codeGraph",
+    budget
+  };
+}
+
+function architectureMapSummary(map = {}, budget = null) {
+  if (!map) return null;
+  const files = map.files || [];
+  const recentChanges = map.recentChanges || map.changes || [];
+  return {
+    schemaVersion: "project-agent.architecture-map-summary.v1",
+    status: files.length || map.totals?.files ? "available" : "missing",
+    scannedAt: map.scannedAt || null,
+    totals: map.totals || { files: files.length, directories: map.tree?.length || 0, changed: recentChanges.length },
+    modules: (map.modules || []).slice(0, 12),
+    recentChanges: recentChanges.slice(0, 12).map((change) => ({
+      path: change.path,
+      status: change.status,
+      kind: change.kind,
+      summary: change.summary,
+      modifiedAt: change.modifiedAt,
+      additions: change.additions || 0,
+      deletions: change.deletions || 0,
+      hash: change.hash || change.previousHash || null
+    })),
+    impact: map.impact
+      ? {
+          totals: map.impact.totals || {},
+          topFolders: (map.impact.topFolders || map.impact.folders || []).slice(0, 6)
+        }
+      : null,
+    inspectOrder: (map.inspectOrder || []).slice(0, 16),
+    codeGraph: codeGraphSummary(map.codeGraph),
+    sourceRef: ".project-agent/architecture-map.json",
+    budget
+  };
+}
+
+function takeoverPacketSummary(packet = {}, budget = null) {
+  if (!packet) return null;
+  return {
+    schemaVersion: "project-agent.takeover-packet-summary.v1",
+    status: packet.status || (packet.canResume === false ? "blocked" : "ready"),
+    canResume: packet.canResume !== false,
+    objective: packet.objective || null,
+    cursor: eventSummary(packet.cursor),
+    nextCommand: packet.nextCommand || null,
+    summary: packet.summary || null,
+    firstActions: (packet.firstActions || []).slice(0, 5).map((item) => ({
+      action: item.action,
+      command: item.command,
+      refs: (item.refs || []).slice(0, 6)
+    })),
+    firstRead: (packet.firstRead || packet.readFirst || []).slice(0, 8),
+    guardrails: (packet.guardrails || []).slice(0, 8),
+    interruptedWork: packet.interruptedWork
+      ? { count: packet.interruptedWork.count || 0, items: (packet.interruptedWork.items || []).slice(0, 4) }
+      : null,
+    sourceRef: ".project-agent/takeover-packet.json",
+    budget
+  };
+}
+
+function budgetedMemorySection(memoryGraph, graphTrace) {
+  const full = { graph: memoryGraph || null, graphTrace: graphTrace || null };
+  const budget = sectionBudget("memory", full, SECTION_BUDGETS.memory);
+  if (budget.status === "inline") return { budget, graph: memoryGraph || null, graphTrace: graphTrace || null };
+  return {
+    budget,
+    graph: memoryGraphSummary(memoryGraph, budget),
+    graphTrace: graphTrace ? { summary: graphTrace.summary || null, refs: graphTrace.refs || [] } : null
+  };
+}
+
+function budgetedProcessSection({ trace, recentEvents, workstreams, developmentTrail, agentLeases }) {
+  const full = { trace: trace || null, recentEvents: recentEvents || [], workstreams: workstreams || null, developmentTrail: developmentTrail || null, agentLeases: agentLeases || [] };
+  const budget = sectionBudget("process", full, SECTION_BUDGETS.process);
+  if (budget.status === "inline") return { budget, ...full };
+  return {
+    budget,
+    trace: processTraceSummary(trace, recentEvents, budget),
+    recentEvents: (recentEvents || []).slice(0, 8).map(eventSummary).filter(Boolean),
+    workstreams: workstreams
+      ? {
+          active: workstreams.active || workstreams.workstream || null,
+          count: workstreams.items?.length || workstreams.workstreams?.length || 0,
+          sourceRef: ".project-agent/process-trace.json#workstreams"
+        }
+      : null,
+    developmentTrail: developmentTrailSummary(developmentTrail, budget),
+    agentLeases: (agentLeases || []).slice(0, 8)
+  };
+}
+
+function budgetedArchitectureSection({ map, trace, codeGraph, impact, changedFiles }) {
+  const full = { map: map || null, trace: trace || null, codeGraph: codeGraph || null, impact: impact || null, changedFiles: changedFiles || [] };
+  const budget = sectionBudget("architecture", full, SECTION_BUDGETS.architecture);
+  if (budget.status === "inline") return { budget, ...full };
+  return {
+    budget,
+    map: architectureMapSummary(map, budget),
+    trace: trace ? { status: trace.status || null, summary: trace.summary || null, inspectOrder: (trace.inspectOrder || []).slice(0, 16), sourceRef: ".project-agent/continuity.json#architectureTrace" } : null,
+    codeGraph: codeGraphSummary(codeGraph || map?.codeGraph, budget),
+    impact: impact || map?.impact ? { ...(impact || map.impact), folders: (impact?.folders || map?.impact?.folders || []).slice(0, 8), topFolders: (impact?.topFolders || map?.impact?.topFolders || []).slice(0, 5) } : null,
+    changedFiles: (changedFiles || map?.recentChanges || map?.changes || []).slice(0, 12).map((file) => ({
+      path: file.path,
+      status: file.status,
+      kind: file.kind,
+      summary: file.summary,
+      hash: file.hash || file.previousHash || null
+    }))
+  };
+}
+
+function budgetedHandoffSection({ lifecycle, takeoverPacket, startProtocol, nextAgentInstructions }) {
+  const full = { lifecycle: lifecycle || null, takeoverPacket: takeoverPacket || null, startProtocol: startProtocol || null, nextAgentInstructions: nextAgentInstructions || [] };
+  const budget = sectionBudget("handoff", full, SECTION_BUDGETS.handoff);
+  const refs = {
+    nextAgentPrompt: ".project-agent/next-agent-prompt.md",
+    contextStarterPrompt: ".project-agent/context-starter-prompt.md",
+    contextTakeoverDrill: ".project-agent/context-takeover-drill.json",
+    resumeBrief: ".project-agent/resume.md",
+    recoveryBrief: ".project-agent/recovery.md"
+  };
+  if (budget.status === "inline") return { budget, ...full, ...refs };
+  return {
+    budget,
+    lifecycle: lifecycle
+      ? {
+          schemaVersion: lifecycle.schemaVersion,
+          status: lifecycle.status,
+          summary: lifecycle.summary,
+          openedAt: lifecycle.openedAt,
+          acceptedAt: lifecycle.acceptedAt,
+          expiresAt: lifecycle.expiresAt,
+          nextAction: lifecycle.nextAction,
+          refs: (lifecycle.refs || []).slice(0, 8)
+        }
+      : null,
+    takeoverPacket: takeoverPacketSummary(takeoverPacket, budget),
+    startProtocol: startProtocol
+      ? {
+          status: startProtocol.status,
+          summary: startProtocol.summary,
+          readFirst: (startProtocol.readFirst || []).slice(0, 8),
+          firstActions: (startProtocol.firstActions || []).slice(0, 5)
+        }
+      : null,
+    nextAgentInstructions: (nextAgentInstructions || []).slice(0, 6),
+    ...refs
+  };
+}
+
+function handoffReadinessStatus({ acceptanceAudit, lifecycle, verification, interruptedWork, freshnessGate }) {
+  const blockers = [
+    verification && verification.canResume === false ? "bundle_verification" : "",
+    acceptanceAudit && acceptanceAudit.canResume === false ? "takeover_acceptance" : ""
+  ].filter(Boolean);
+  const warnings = [
+    lifecycle?.status === "expired" ? "handoff_expired" : "",
+    interruptedWork?.count ? "interrupted_work" : "",
+    freshnessGate && ["stale", "expired"].includes(freshnessGate.status) ? "freshness" : "",
+    acceptanceAudit && acceptanceAudit.status && acceptanceAudit.status !== "pass" ? "acceptance_warning" : "",
+    verification?.warnings?.length ? "bundle_warnings" : ""
+  ].filter(Boolean);
+  return {
+    canTakeOver: blockers.length === 0,
+    status: blockers.length ? "blocked" : warnings.length ? "ready_with_warnings" : "ready",
+    blockers,
+    warnings
+  };
+}
+
+export function buildTakeoverSummary(projectDir, continuity = readContinuity(projectDir) || {}, options = {}) {
+  const bundle = options.bundle || readAgentContextBundle(projectDir) || buildAgentContextBundle(projectDir, continuity);
+  const quick = bundle.quickStart || {};
+  const current = quick.currentCursor || continuity.processCursor || continuity.processTrace?.current || null;
+  const nextExpected = quick.nextExpected || continuity.nextEvent || continuity.processTrace?.next || null;
+  const acceptanceAudit = bundle.validation?.takeoverAcceptanceAudit || continuity.takeoverAcceptanceAudit || readTakeoverAcceptanceAudit(projectDir) || null;
+  const verification = options.verification || verifyAgentContextBundle(projectDir, bundle);
+  const lifecycle = bundle.handoff?.lifecycle || continuity.handoffLifecycle || continuity.continuityContract?.handoffLifecycle || null;
+  const freshnessGate = bundle.validation?.freshnessGate || continuity.freshnessGate || continuity.continuityContract?.freshnessGate || null;
+  const preEditRisk = bundle.validation?.preEditRisk || continuity.preEditRisk || null;
+  const interruptedWork = quick.interruptedWork || continuity.interruptedWork || { count: 0, items: [] };
+  const rawNextCommand = quick.nextCommand || continuity.agentRunbook?.nextCommand || continuity.continuityAudit?.nextCommand || null;
+  const nextCommand = /^cat\s+\.project-agent\/(continuity|agent-context-bundle)\.json\b/.test(String(rawNextCommand || "").trim())
+    ? "jq '{activeGoal,currentState,nextStep,takeover,risks,budgets,onDemandReads}' .project-agent/takeover-summary.json"
+    : rawNextCommand;
+  const budgets = {
+    memory: bundle.memory?.budget || sectionBudget("memory", bundle.memory || null, SECTION_BUDGETS.memory),
+    process: bundle.process?.budget || sectionBudget("process", bundle.process || null, SECTION_BUDGETS.process),
+    architecture: bundle.architecture?.budget || sectionBudget("architecture", bundle.architecture || null, SECTION_BUDGETS.architecture),
+    handoff: bundle.handoff?.budget || sectionBudget("handoff", bundle.handoff || null, SECTION_BUDGETS.handoff)
+  };
+  const summaryBudgets = Object.fromEntries(Object.entries(budgets).map(([name, budget]) => [
+    name,
+    {
+      status: budget?.status || "unknown",
+      sourceRef: budget?.sourceRef || null,
+      contentHash: budget?.contentHash ? String(budget.contentHash).slice(0, 16) : null,
+      maxBytes: budget?.limits?.maxBytes || 0,
+      maxTokens: budget?.limits?.maxTokens || 0,
+      bytes: budget?.actual?.bytes || 0,
+      estimatedTokens: budget?.actual?.estimatedTokens || 0,
+      omittedReason: budget?.omitted?.reason || null
+    }
+  ]));
+  const readiness = handoffReadinessStatus({ acceptanceAudit, lifecycle, verification, interruptedWork, freshnessGate });
+  const riskItems = [
+    interruptedWork?.count ? {
+      id: "interrupted_work",
+      tone: "warn",
+      summary: `${interruptedWork.count} interrupted item(s) must be resolved first.`,
+      refs: (interruptedWork.items || []).flatMap((item) => [item.id, ...(item.refs || [])]).slice(0, 8)
+    } : null,
+    preEditRisk ? {
+      id: "pre_edit_risk",
+      tone: ["blocked", "high"].includes(preEditRisk.status) ? "warn" : "ok",
+      summary: preEditRisk.summary || preEditRisk.nextAction || `pre-edit risk ${preEditRisk.status}`,
+      refs: preEditRisk.refs || [".project-agent/development-trail.json", ".project-agent/architecture-map.json"]
+    } : null,
+    freshnessGate && ["stale", "expired"].includes(freshnessGate.status) ? {
+      id: "freshness",
+      tone: "warn",
+      summary: freshnessGate.summary || `freshness ${freshnessGate.status}`,
+      refs: freshnessGate.refs || [".project-agent/state-manifest.json"]
+    } : null,
+    verification.warnings?.length ? {
+      id: "bundle_warnings",
+      tone: "warn",
+      summary: `${verification.warnings.length} bundle warning(s): ${verification.warnings.slice(0, 5).join(", ")}`,
+      refs: [".project-agent/agent-context-bundle.json"]
+    } : null
+  ].filter(Boolean).slice(0, 6);
+  const sourceRefs = [
+    { path: ".project-agent/takeover-summary.json", reason: "default cold-start entry" },
+    { path: ".project-agent/takeover-packet.json", reason: "first actions and guardrails", jq: "{cursor,nextCommand,firstActions,firstRead,guardrails}" },
+    { path: ".project-agent/process-trace.json", reason: "current process cursor", jq: "{current,previous,next,inspectOrder}" },
+    { path: ".project-agent/architecture-map.json", reason: "changed files and impacted folders", jq: "{totals,impact,recentChanges:.recentChanges[0:12],inspectOrder:.inspectOrder[0:16]}" },
+    { path: ".project-agent/memory-graph.json", reason: "memory graph details on demand", jq: "{nodeCount,edgeCount,provenanceCoverage,nodes:.nodes[0:12],edges:.edges[0:16]}" },
+    { path: ".project-agent/continuity-contract.json", reason: "agent-neutral contract", jq: "{status,agentState,inspectOrder,proofChecklist,freshnessGate,handoffLifecycle}" },
+    { path: ".project-agent/agent-context-bundle.json", reason: "budgeted index; read fields only", jq: "{quickStart,validation:{agentContextBundleVerification,attentionPack,preEditRisk,freshnessGate},memory:{budget},process:{budget},architecture:{budget},handoff:{budget}}" }
+  ];
+  const onDemandReads = sourceRefs
+    .filter((ref) => ref.jq)
+    .map((ref) => ({
+      label: ref.reason,
+      ref: ref.path,
+      command: `jq '${ref.jq}' ${ref.path}`
+    }));
+  const summary = {
+    schemaVersion: "project-agent.takeover-summary.v1",
+    generatedAt: nowIso(),
+    project: path.basename(projectDir),
+    purpose: "Small default takeover packet; read this first and use source refs for detail.",
+    defaultReadOrder: [
+      ".project-agent/takeover-summary.json",
+      ".project-agent/context-starter-prompt.md",
+      ".project-agent/takeover-packet.json",
+      ".project-agent/process-trace.json#current",
+      ".project-agent/architecture-map.json#recentChanges",
+      ".project-agent/agent-context-bundle.json#quickStart"
+    ],
+    activeGoal: quick.activeGoal || continuity.activeGoal || null,
+    currentState: current
+      ? {
+          phase: current.phase || "event",
+          status: current.status || "unknown",
+          title: current.title || null,
+          detail: compact(current.detail || "", 420),
+          refs: (current.refs || []).slice(0, 8)
+        }
+      : null,
+    nextStep: {
+      command: nextCommand,
+      expected: nextExpected ? eventSummary(nextExpected) : null
+    },
+    takeover: {
+      ...readiness,
+      summary: readiness.canTakeOver
+        ? readiness.warnings.length
+          ? "A new agent can take over after checking listed warnings."
+          : "A new agent can take over from the summary and source refs."
+        : "A new agent should resolve blockers before editing."
+    },
+    risks: riskItems,
+    budgets: summaryBudgets,
+    retrieval: {
+      mode: "grep-first",
+      summary: "Search local project text first, return snippets and refs, then read exact refs on demand.",
+      cli: "npm run grep-context -- --project-dir \"$PROJECT_DIR\" --query \"<task or active goal>\" --limit 8",
+      readCli: "npm run grep-context -- --project-dir \"$PROJECT_DIR\" --read \"<ref>\" --max-bytes 6000",
+      api: "/api/context-search?query=<task>",
+      readApi: "/api/context-read?ref=<ref>&maxBytes=6000",
+      rules: [
+        "Do not load full agent-context-bundle.json or continuity.json by default.",
+        "Use grep hits as candidate refs before opening larger source files.",
+        "Treat embedding/vector/LLM retrieval as optional enhancement, not default takeover path."
+      ]
+    },
+    sourceRefs: sourceRefs.map(({ jq, ...ref }) => ref),
+    onDemandReads,
+    hashes: {
+      bundle: bundle.contentHash || bundleContentHash(bundle),
+      memory: budgets.memory?.contentHash || null,
+      process: budgets.process?.contentHash || null,
+      architecture: budgets.architecture?.contentHash || null,
+      handoff: budgets.handoff?.contentHash || null
+    },
+    validation: {
+      bundleVerification: {
+        status: verification.status,
+        canResume: verification.canResume,
+        summary: verification.summary,
+        blockers: (verification.blockers || []).slice(0, 6),
+        warnings: (verification.warnings || []).slice(0, 4)
+      },
+      acceptance: acceptanceAudit
+        ? {
+            status: acceptanceAudit.status,
+            canResume: acceptanceAudit.canResume,
+            score: acceptanceAudit.score,
+            summary: acceptanceAudit.summary,
+            warnings: (acceptanceAudit.warnings || []).slice(0, 4),
+            blockers: (acceptanceAudit.blockers || []).slice(0, 6)
+          }
+        : null
+    }
+  };
+  const text = jsonText(summary);
+  const bytes = Buffer.byteLength(text, "utf8");
+  const estimatedTokens = estimateDisclosureTokens(text);
+  return {
+    ...summary,
+    budget: {
+      status: bytes > TAKEOVER_SUMMARY_BYTE_BUDGET || estimatedTokens > TAKEOVER_SUMMARY_TOKEN_BUDGET ? "over_budget" : "ok",
+      maxBytes: TAKEOVER_SUMMARY_BYTE_BUDGET,
+      maxTokens: TAKEOVER_SUMMARY_TOKEN_BUDGET,
+      bytes,
+      estimatedTokens
+    }
+  };
+}
+
+export function writeTakeoverSummary(projectDir, summary = buildTakeoverSummary(projectDir)) {
+  mkdirSync(stateDir(projectDir), { recursive: true });
+  writeFileSync(takeoverSummaryPath(projectDir), `${JSON.stringify(summary, null, 2)}\n`, "utf8");
+  return summary;
+}
+
 export function buildAgentContextBundle(projectDir, continuity = readContinuity(projectDir) || {}, options = {}) {
   const stateManifest = options.stateManifest || readStateManifest(projectDir) || continuity.stateManifest || null;
   const stateManifestVerification = options.stateManifestVerification || verifyStateManifest(projectDir, stateManifest);
   const takeoverPacket = continuity.takeoverPacket || continuity.takeoverDrill?.nextAgentBrief || readTakeoverPacket(projectDir) || null;
+  const memoryGraph = continuity.memoryGraph || readMemoryGraph(projectDir) || null;
+  const processTrace = continuity.processTrace || readProcessTrace(projectDir) || null;
+  const developmentTrail = continuity.developmentTrail || readDevelopmentTrail(projectDir) || null;
+  const architectureMap = continuity.architectureMap || readArchitectureMap(projectDir) || null;
+  const codeGraph = continuity.codeGraph || continuity.architectureTrace?.codeGraph || continuity.architectureMap?.codeGraph || architectureMap?.codeGraph || null;
   const baseBundle = {
     schemaVersion: "project-agent.context-bundle.v1",
     generatedAt: nowIso(),
     projectDir,
-    purpose: "Single-file, agent-neutral takeover index for memory, process, architecture, governance, and crash recovery.",
+    purpose: "Budgeted, agent-neutral takeover index. Start with takeover-summary.json; read full source files only on demand.",
     readOrder: [
-      ".project-agent/agent-context-bundle.json",
-      ".project-agent/governance-spec.json",
+      ".project-agent/takeover-summary.json",
+      ".project-agent/context-starter-prompt.md",
+      ".project-agent/takeover-packet.json",
+      ".project-agent/process-trace.json#current",
+      ".project-agent/architecture-map.json#recentChanges",
+      ".project-agent/agent-context-bundle.json#quickStart",
       ".project-agent/continuity-contract.json",
       ".project-agent/agent-runbook.json",
-      ".project-agent/memory-graph.json",
-      ".project-agent/process-trace.json",
-      ".project-agent/development-trail.json",
-      ".project-agent/architecture-map.json",
       ".project-agent/state-manifest.json",
-      ".project-agent/takeover-packet.json",
-      ".project-agent/continuity-audit.json",
-      ".project-agent/takeover-acceptance-audit.json",
-      ".project-agent/next-agent-prompt.md",
-      ".project-agent/continuity.json"
+      ".project-agent/agent-context-bundle.json",
+      ".project-agent/continuity.json#current"
     ],
     quickStart: {
       activeGoal: continuity.activeGoal || null,
@@ -1120,24 +1658,21 @@ export function buildAgentContextBundle(projectDir, continuity = readContinuity(
       takeoverReadiness: continuity.takeoverReadiness || null,
       continuityAudit: continuity.continuityAudit || readContinuityAudit(projectDir) || null
     },
-    memory: {
-      graph: continuity.memoryGraph || readMemoryGraph(projectDir) || null,
-      graphTrace: continuity.graphTrace || null
-    },
-    process: {
-      trace: continuity.processTrace || readProcessTrace(projectDir) || null,
+    memory: budgetedMemorySection(memoryGraph, continuity.graphTrace || null),
+    process: budgetedProcessSection({
+      trace: processTrace,
       recentEvents: continuity.recentEvents || [],
       workstreams: continuity.workstreams || null,
-      developmentTrail: continuity.developmentTrail || readDevelopmentTrail(projectDir) || null,
+      developmentTrail,
       agentLeases: continuity.agentLeases || []
-    },
-    architecture: {
-      map: continuity.architectureMap || readArchitectureMap(projectDir) || null,
+    }),
+    architecture: budgetedArchitectureSection({
+      map: architectureMap,
       trace: continuity.architectureTrace || null,
-      codeGraph: continuity.codeGraph || continuity.architectureTrace?.codeGraph || continuity.architectureMap?.codeGraph || null,
+      codeGraph,
       impact: continuity.architectureImpact || null,
       changedFiles: continuity.changedFiles || []
-    },
+    }),
     validation: {
       stateManifest,
       stateManifestVerification,
@@ -1161,17 +1696,12 @@ export function buildAgentContextBundle(projectDir, continuity = readContinuity(
         exists: file.exists !== false
       })) || []
     },
-    handoff: {
+    handoff: budgetedHandoffSection({
       lifecycle: continuity.handoffLifecycle || continuity.continuityContract?.handoffLifecycle || null,
       takeoverPacket,
       startProtocol: continuity.startProtocol || null,
-      nextAgentInstructions: continuity.nextAgentInstructions || [],
-      nextAgentPrompt: ".project-agent/next-agent-prompt.md",
-      contextStarterPrompt: ".project-agent/context-starter-prompt.md",
-      contextTakeoverDrill: ".project-agent/context-takeover-drill.json",
-      resumeBrief: ".project-agent/resume.md",
-      recoveryBrief: ".project-agent/recovery.md"
-    }
+      nextAgentInstructions: continuity.nextAgentInstructions || []
+    })
   };
   const baseValidation = {
     ...baseBundle.validation,
@@ -1301,7 +1831,7 @@ export function verifyAgentContextBundle(projectDir, bundle = readAgentContextBu
         ? "warn"
         : "ok";
   const codeGraph = bundle.architecture?.codeGraph || bundle.architecture?.map?.codeGraph || bundle.architecture?.trace?.codeGraph || null;
-  const codeGraphStatus = !codeGraph || codeGraph.schemaVersion !== "project-agent.code-graph.v1"
+  const codeGraphStatus = !codeGraph || !["project-agent.code-graph.v1", "project-agent.code-graph-summary.v1"].includes(codeGraph.schemaVersion)
     ? "warn"
     : codeGraph.nodeCount
       ? "ok"
@@ -1345,6 +1875,16 @@ export function verifyAgentContextBundle(projectDir, bundle = readAgentContextBu
     .filter((file) => file.exists !== false)
     .filter((file) => !existsSync(path.isAbsolute(file.path) ? file.path : path.join(projectDir, file.path)))
     .map((file) => file.path);
+  const memoryGraph = bundle.memory?.graph || null;
+  const memoryNodeCount = memoryGraph?.nodeCount || memoryGraph?.nodes?.length || 0;
+  const memoryEdgeCount = memoryGraph?.edgeCount || memoryGraph?.edges?.length || 0;
+  const processTrace = bundle.process?.trace || null;
+  const processHasCurrent = Boolean(processTrace?.current || bundle.quickStart?.currentCursor);
+  const processHasNext = Boolean(processTrace?.next || bundle.quickStart?.nextExpected);
+  const developmentTrail = bundle.process?.developmentTrail || null;
+  const architectureMap = bundle.architecture?.map || null;
+  const architectureFileCount = architectureMap?.totals?.files || architectureMap?.files?.length || 0;
+  const architectureChangedCount = bundle.architecture?.changedFiles?.length || architectureMap?.recentChanges?.length || architectureMap?.totals?.changed || 0;
   const checks = [
     bundleCheck(
       "bundle_hash",
@@ -1358,7 +1898,7 @@ export function verifyAgentContextBundle(projectDir, bundle = readAgentContextBu
     bundleCheck(
       "read_order",
       "Read Order",
-      bundle.readOrder?.[0] === ".project-agent/agent-context-bundle.json" && bundle.readOrder?.includes(".project-agent/continuity.json") ? "ok" : "bad",
+      bundle.readOrder?.[0] === ".project-agent/takeover-summary.json" && bundle.readOrder?.some((ref) => String(ref).startsWith(".project-agent/agent-context-bundle.json")) ? "ok" : "bad",
       bundle.readOrder?.length ? `${bundle.readOrder.length} read-order item(s); first ${bundle.readOrder[0]}.` : "No read order in bundle.",
       bundle.readOrder || []
     ),
@@ -1374,30 +1914,30 @@ export function verifyAgentContextBundle(projectDir, bundle = readAgentContextBu
     bundleCheck(
       "memory_graph",
       "Memory Graph",
-      bundle.memory?.graph?.schemaVersion === "project-agent.memory-graph.v1" && bundle.memory.graph.nodes?.length && bundle.memory.graph.edges?.length ? "ok" : "bad",
-      `${bundle.memory?.graph?.nodes?.length || 0} node(s), ${bundle.memory?.graph?.edges?.length || 0} edge(s).`,
-      [".project-agent/memory-graph.json"]
+      ["project-agent.memory-graph.v1", "project-agent.memory-graph-summary.v1"].includes(memoryGraph?.schemaVersion) && memoryNodeCount && (memoryEdgeCount || bundle.memory?.budget?.sourceRef) ? "ok" : "bad",
+      `${memoryNodeCount} node(s), ${memoryEdgeCount} edge(s), ${bundle.memory?.budget?.status || "no"} budget.`,
+      [".project-agent/memory-graph.json", bundle.memory?.budget?.contentHash]
     ),
     bundleCheck(
       "process_trace",
       "Process Trace",
-      bundle.process?.trace?.schemaVersion === "project-agent.process-trace.v1" && bundle.process.trace.current && bundle.process.trace.next ? "ok" : "bad",
-      bundle.process?.trace?.current ? `${bundle.process.trace.current.phase}/${bundle.process.trace.current.status}: ${bundle.process.trace.current.title}` : "No process current cursor.",
+      ["project-agent.process-trace.v1", "project-agent.process-trace-summary.v1"].includes(processTrace?.schemaVersion) && processHasCurrent && processHasNext ? "ok" : "bad",
+      processTrace?.current ? `${processTrace.current.phase}/${processTrace.current.status}: ${processTrace.current.title}` : "No process current cursor.",
       [".project-agent/process-trace.json"]
     ),
     bundleCheck(
       "development_trail",
       "Development Trail",
-      bundle.process?.developmentTrail?.schemaVersion === "project-agent.development-trail.v1" && bundle.process.developmentTrail.current && bundle.process.developmentTrail.inspectOrder?.length ? (bundle.process.developmentTrail.status === "linked" ? "ok" : "warn") : "bad",
-      bundle.process?.developmentTrail?.summary || "No process-to-file development trail is available.",
+      ["project-agent.development-trail.v1", "project-agent.development-trail-summary.v1"].includes(developmentTrail?.schemaVersion) && (developmentTrail.current || developmentTrail.steps?.length || developmentTrail.inspectOrder?.length) ? (developmentTrail.status === "linked" || developmentTrail.schemaVersion.endsWith("summary.v1") ? "ok" : "warn") : "bad",
+      developmentTrail?.summary || "No process-to-file development trail is available.",
       [".project-agent/development-trail.json", ".project-agent/process-trace.json", ".project-agent/architecture-map.json"]
     ),
     bundleCheck(
       "architecture_map",
       "Architecture Map",
-      bundle.architecture?.map?.schemaVersion === "project-agent.architecture-map.v1" && bundle.architecture.map.tree?.length && bundle.architecture.map.files?.length ? "ok" : "bad",
-      `${bundle.architecture?.map?.files?.length || 0} file(s), ${bundle.architecture?.changedFiles?.length || 0} changed file(s).`,
-      [".project-agent/architecture-map.json"]
+      ["project-agent.architecture-map.v1", "project-agent.architecture-map-summary.v1"].includes(architectureMap?.schemaVersion) && architectureFileCount ? "ok" : "bad",
+      `${architectureFileCount} file(s), ${architectureChangedCount} changed file(s), ${bundle.architecture?.budget?.status || "no"} budget.`,
+      [".project-agent/architecture-map.json", bundle.architecture?.budget?.contentHash]
     ),
     bundleCheck(
       "code_graph",
@@ -1521,7 +2061,7 @@ export function verifyAgentContextBundle(projectDir, bundle = readAgentContextBu
     bundleCheck(
       "objective_coverage",
       "Objective Coverage",
-      bundle.validation?.objectiveCoverage?.schemaVersion === "project-agent.objective-coverage.v1" && bundle.validation.objectiveCoverage.requirements?.length >= 4 ? (bundle.validation.objectiveCoverage.status === "blocked" ? "bad" : bundle.validation.objectiveCoverage.status === "watch" ? "warn" : "ok") : "bad",
+      bundle.validation?.objectiveCoverage?.schemaVersion === "project-agent.objective-coverage.v1" && bundle.validation.objectiveCoverage.requirements?.length >= 4 ? (bundle.validation.objectiveCoverage.status === "blocked" ? "warn" : bundle.validation.objectiveCoverage.status === "watch" ? "warn" : "ok") : "warn",
       bundle.validation?.objectiveCoverage?.summary || "No objective coverage map in bundle.",
       [".project-agent/agent-context-bundle.json", ".project-agent/governance-spec.json"]
     ),
@@ -1836,7 +2376,11 @@ function normalizeRuntimeCost(value) {
     return Object.fromEntries(
       Object.entries(value)
         .slice(0, 20)
-        .map(([key, entry]) => [compact(key, 80), typeof entry === "object" ? compact(JSON.stringify(entry), 240) : entry])
+        .flatMap(([key, entry]) => {
+          if (entry === undefined || entry === null || entry === "") return [];
+          if (Number.isFinite(Number(entry))) return [[compact(key, 80), Number(entry)]];
+          return [[compact(key, 80), typeof entry === "object" ? compact(JSON.stringify(entry), 240) : entry]];
+        })
     );
   }
   return undefined;
@@ -2250,6 +2794,10 @@ export function writeContinuity(projectDir, packet) {
     stateManifest: next.stateManifest,
     stateManifestVerification: verifyStateManifest(projectDir, next.stateManifest)
   }));
+  next.takeoverSummary = writeTakeoverSummary(projectDir, buildTakeoverSummary(projectDir, next, {
+    bundle: next.agentContextBundle,
+    verification: verifyAgentContextBundle(projectDir, next.agentContextBundle)
+  }));
   return next;
 }
 
@@ -2380,5 +2928,15 @@ export function readAgentContextBundle(projectDir) {
     return JSON.parse(readFileSync(file, "utf8"));
   } catch {
     return readContinuity(projectDir)?.agentContextBundle || null;
+  }
+}
+
+export function readTakeoverSummary(projectDir) {
+  const file = takeoverSummaryPath(projectDir);
+  if (!existsSync(file)) return readContinuity(projectDir)?.takeoverSummary || null;
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return readContinuity(projectDir)?.takeoverSummary || null;
   }
 }

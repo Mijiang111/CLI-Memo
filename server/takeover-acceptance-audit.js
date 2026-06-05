@@ -75,6 +75,7 @@ export function buildTakeoverAcceptanceAudit(projectDir, continuity = readContin
   const architectureMap = readJson(projectDir, ".project-agent/architecture-map.json") || continuity.architectureMap || {};
   const continuityAudit = readJson(projectDir, ".project-agent/continuity-audit.json") || continuity.continuityAudit || {};
   const contextDrill = readJson(projectDir, ".project-agent/context-takeover-drill.json") || {};
+  const takeoverSummary = readJson(projectDir, ".project-agent/takeover-summary.json") || continuity.takeoverSummary || {};
   const governanceSpec = readJson(projectDir, ".project-agent/governance-spec.json") || continuity.governanceSpec || {};
   const contextPrompt = readText(projectDir, ".project-agent/context-starter-prompt.md");
   const agents = readText(projectDir, "AGENTS.md");
@@ -119,10 +120,10 @@ export function buildTakeoverAcceptanceAudit(projectDir, continuity = readContin
     row(
       "agent_neutral_handoff",
       "A replacement agent must be able to resume from files without prior chat history.",
-      bundleVerification.canResume && continuityAuditReady && contextDrill.canResume ? "ok" : "bad",
-      `canResume bundle=${bundleVerification.canResume ? "yes" : "no"} (${bundleVerification.status || "missing"}), continuityAudit=${continuityAuditReady ? "yes" : "no"} (${continuityAuditDetail}), contextDrill=${contextDrill.canResume ? "yes" : "no"} (${contextDrill.status || "missing"}).`,
-      [".project-agent/agent-context-bundle.json", ".project-agent/continuity-audit.json", ".project-agent/context-takeover-drill.json", ".project-agent/context-starter-prompt.md"],
-      "Run context verification, continuity audit, and bundle-only takeover drill before handing off."
+      takeoverSummary.schemaVersion === "project-agent.takeover-summary.v1" && bundleVerification.canResume && continuityAuditReady && contextDrill.canResume ? "ok" : "bad",
+      `summary=${takeoverSummary.schemaVersion ? "yes" : "no"}, canResume bundle=${bundleVerification.canResume ? "yes" : "no"} (${bundleVerification.status || "missing"}), continuityAudit=${continuityAuditReady ? "yes" : "no"} (${continuityAuditDetail}), contextDrill=${contextDrill.canResume ? "yes" : "no"} (${contextDrill.status || "missing"}).`,
+      [".project-agent/takeover-summary.json", ".project-agent/agent-context-bundle.json", ".project-agent/continuity-audit.json", ".project-agent/context-takeover-drill.json", ".project-agent/context-starter-prompt.md"],
+      "Run context verification, continuity audit, and summary-first takeover drill before handing off."
     ),
     row(
       "coherent_state_snapshot",
@@ -135,10 +136,10 @@ export function buildTakeoverAcceptanceAudit(projectDir, continuity = readContin
     row(
       "read_order_teaches_new_agent",
       "The project must tell any new agent exactly what to read first.",
-      readOrder.includes(".project-agent/development-trail.json") && agents.includes("development-trail.json") && contextPrompt.includes("Development trail:") ? "ok" : "bad",
+      readOrder[0] === ".project-agent/takeover-summary.json" && takeoverSummary.onDemandReads?.length && contextPrompt.includes("takeover-summary.json") && contextPrompt.includes("On-Demand Reads") ? "ok" : "bad",
       `${readOrder.length || 0} bundle read-order item(s); AGENTS/context prompt ${agents && contextPrompt ? "present" : "missing"}.`,
-      [".project-agent/agent-context-bundle.json", ".project-agent/context-starter-prompt.md", "AGENTS.md"],
-      "Update bundle readOrder, AGENTS.md, and context-starter-prompt.md with development-trail instructions."
+      [".project-agent/takeover-summary.json", ".project-agent/agent-context-bundle.json", ".project-agent/context-starter-prompt.md", "AGENTS.md"],
+      "Update bundle readOrder, AGENTS.md, and context-starter-prompt.md with summary-first/on-demand instructions."
     ),
     row(
       "governance_matches_user_objective",

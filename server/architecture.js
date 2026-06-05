@@ -33,11 +33,18 @@ const IMPORTANT_FILES = new Set([
 
 const INTERNAL_RUNTIME_FILES = new Set([
   ".project-agent/runtime.json",
+  ".project-agent/takeover-summary.json",
+  ".project-agent/agent-context-bundle.json",
+  ".project-agent/context-starter-prompt.md",
+  ".project-agent/context-takeover-drill.json",
+  ".project-agent/codex-takeover-smoke.json",
   ".project-agent/memory-graph.json",
   ".project-agent/process-trace.json",
+  ".project-agent/development-trail.json",
   ".project-agent/architecture-map.json",
   ".project-agent/takeover-packet.json",
   ".project-agent/continuity-audit.json",
+  ".project-agent/takeover-acceptance-audit.json",
   ".project-agent/governance-spec.json",
   ".project-agent/state-manifest.json",
   ".project-agent/agent-runbook.json",
@@ -47,6 +54,10 @@ const INTERNAL_RUNTIME_FILES = new Set([
   ".project-agent/resume.md",
   ".project-agent/next-agent-prompt.md"
 ]);
+
+function isInternalRuntimePath(relPath) {
+  return relPath === ".project-agent" || String(relPath || "").startsWith(".project-agent/");
+}
 
 const SOURCE_EXTENSIONS = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".py", ".go", ".rs", ".java", ".rb", ".php", ".css", ".scss", ".html"]);
 const CODE_GRAPH_EXTENSIONS = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"]);
@@ -179,7 +190,7 @@ function scanDir(root, rel = "", depth = 0, files = [], maxFiles = 600) {
     }
     if (entry.isDirectory() && IGNORE_DIRS.has(entry.name)) continue;
     const childRel = toPosix(path.join(rel, entry.name));
-    if (INTERNAL_RUNTIME_FILES.has(childRel)) continue;
+    if (isInternalRuntimePath(childRel) || INTERNAL_RUNTIME_FILES.has(childRel)) continue;
     const childAbs = path.join(root, childRel);
     let stats;
     try {
@@ -543,7 +554,7 @@ function normalizeChange(change) {
 function mergeRecentChanges(changes, previousChanges) {
   const merged = new Map();
   const ordered = [...changes, ...(previousChanges || [])]
-    .filter((item) => !INTERNAL_RUNTIME_FILES.has(item.path))
+    .filter((item) => !isInternalRuntimePath(item.path) && !INTERNAL_RUNTIME_FILES.has(item.path))
     .map(normalizeChange)
     .sort((a, b) => (b.modifiedAt || "").localeCompare(a.modifiedAt || ""));
   for (const change of ordered) {
@@ -585,7 +596,7 @@ export function buildArchitecture(projectDir, options = {}) {
   if (previous) {
     const currentPaths = new Set(snapshot.files.map((file) => file.path));
     for (const file of previous.files || []) {
-      if (INTERNAL_RUNTIME_FILES.has(file.path)) continue;
+      if (isInternalRuntimePath(file.path) || INTERNAL_RUNTIME_FILES.has(file.path)) continue;
       if (!currentPaths.has(file.path)) {
         statusByPath.set(file.path, "deleted");
         changes.push({

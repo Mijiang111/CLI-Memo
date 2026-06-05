@@ -479,7 +479,7 @@ function TerminalPane({ TerminalClass, FitAddonClass, config, onCommandCaptured,
     onRefresh();
   };
 
-  const backendTone = backend === "pty" ? "ok" : backend === "pipe" ? "warn" : backend === "failed" ? "bad" : "muted";
+  const backendTone = backend === "pty" || backend === "python-pty" ? "ok" : backend === "pipe" ? "warn" : backend === "failed" ? "bad" : "muted";
   const connectionLabel = connected ? "connected" : backend === "pipe" ? "limited" : backend === "failed" ? "offline" : "starting";
   const connectionTone = connected ? "ok" : backend === "pipe" ? "warn" : backend === "failed" ? "bad" : "muted";
   const commandStripText =
@@ -960,7 +960,7 @@ function HandoffPrimerPanel({ continuity, contract, acceptanceAudit }) {
   const current = contextBundle?.quickStart?.currentCursor || takeoverPacket?.cursor || contract?.resume?.current;
   const firstActions = takeoverPacket?.firstActions || startProtocol?.firstActions || contract?.firstActions || [];
   const readFirst = contextBundle?.readOrder?.map((path) => ({ path })) || takeoverPacket?.firstRead || startProtocol?.readFirst || contract?.readFirst || [];
-  const nextCommand = takeoverPacket?.nextCommand || contextBundle?.quickStart?.nextCommand || continuity?.continuityAudit?.nextCommand || "Read the context bundle first.";
+  const nextCommand = continuity?.takeoverSummary?.nextStep?.command || takeoverPacket?.nextCommand || contextBundle?.quickStart?.nextCommand || continuity?.continuityAudit?.nextCommand || "Read the takeover summary first.";
   const tone = acceptanceAudit?.status === "fail" ? "bad" : acceptanceAudit?.status === "warn" ? "warn" : "ok";
   return (
     <section className="insight-section handoff-primer" data-handoff-primer="next-agent-start">
@@ -991,6 +991,50 @@ function HandoffPrimerPanel({ continuity, contract, acceptanceAudit }) {
           ))}
         </div>
       </div>
+    </section>
+  );
+}
+
+function TakeoverSummaryPanel({ summary }) {
+  if (!summary) return null;
+  const takeover = summary.takeover || {};
+  const current = summary.currentState || {};
+  const next = summary.nextStep || {};
+  const budgets = Object.entries(summary.budgets || {});
+  return (
+    <section className="insight-section takeover-readiness" data-takeover-summary=".project-agent/takeover-summary.json">
+      <SectionTitle
+        icon={GitBranch}
+        title="Takeover Summary"
+        action={<Pill tone={takeover.canTakeOver ? "ok" : "warn"}>{takeover.status || "unknown"}</Pill>}
+      />
+      <div className="takeover-summary-copy">
+        <strong>{summary.activeGoal?.objective || "No active goal"}</strong>
+        <span>{takeover.summary || "Summary-first takeover packet."}</span>
+      </div>
+      <div className="readiness-checks">
+        <span className={current.title ? "ok" : "warn"}>{current.title || "No current state"}</span>
+        <span className={next.command ? "ok" : "warn"}>{next.command || "No next command"}</span>
+        <span className={summary.risks?.length ? "warn" : "ok"}>{summary.risks?.length || 0} risk(s)</span>
+      </div>
+      {budgets.length ? (
+        <div className="readiness-checks">
+          {budgets.map(([name, budget]) => (
+            <span key={name} className={budget.status === "inline" || budget.status === "ok" ? "ok" : "warn"}>
+              {name} {budget.status || "unknown"}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <DetailDisclosure title="On-demand reads" meta={`${summary.onDemandReads?.length || 0} command(s)`}>
+        <div className="audit-checks">
+          {(summary.onDemandReads || []).slice(0, 8).map((item) => (
+            <span key={item.ref || item.label} className="ok">
+              {item.command}
+            </span>
+          ))}
+        </div>
+      </DetailDisclosure>
     </section>
   );
 }
@@ -2985,8 +3029,8 @@ function TemporalProvenancePanel({ audit }) {
       </div>
       {facts.length ? (
         <div className="temporal-fact-grid">
-          {facts.slice(0, 6).map((fact) => (
-            <div key={fact.id} className={`temporal-fact-card ${temporalTone(fact.status)}`}>
+          {facts.slice(0, 6).map((fact, index) => (
+            <div key={`${fact.id}-${index}`} className={`temporal-fact-card ${temporalTone(fact.status)}`}>
               <span>{fact.status}</span>
               <strong title={fact.detail || fact.label}>{fact.label}</strong>
               <small title={(fact.sourceRefs || []).join(", ")}>{fact.validUntil || fact.validFrom || fact.sourceRefs?.[0] || "no validity window"}</small>
@@ -3097,14 +3141,15 @@ function RunContextSidecar({
 }) {
   const [openDrawer, setOpenDrawer] = useState("");
   const [mapView, setMapView] = useState("process");
-  const current = processTrace?.current || step;
+  const contextBundle = continuity?.agentContextBundle || null;
+  const takeoverSummary = continuity?.takeoverSummary || null;
+  const current = takeoverSummary?.currentState || processTrace?.current || step;
   const previous = processTrace?.previous;
-  const next = processTrace?.next;
+  const next = takeoverSummary?.nextStep?.expected || processTrace?.next;
   const changedFiles = (architectureMap?.recentChanges || architectureMap?.changes || continuity?.changedFiles || []).slice(0, 4);
   const impactFolders = (architectureMap?.impact?.topFolders || architectureMap?.impact?.folders || []).slice(0, 3);
   const memoryCount = memoryGraph?.nodeCount || memoryGraph?.nodes?.length || 0;
-  const acceptanceReady = takeoverAcceptanceAudit?.status === "pass" || takeoverAcceptanceAudit?.canResume;
-  const contextBundle = continuity?.agentContextBundle || null;
+  const acceptanceReady = takeoverSummary?.takeover?.canTakeOver ?? (takeoverAcceptanceAudit?.status === "pass" || takeoverAcceptanceAudit?.canResume);
   const handoffLifecycle = continuity?.handoffLifecycle || contextBundle?.handoff?.lifecycle || continuity?.continuityContract?.handoffLifecycle || null;
   const disclosureGate = contextBundle?.validation?.disclosureGate || null;
   const provenanceLedger = contextBundle?.validation?.provenanceLedger || null;
@@ -3134,15 +3179,18 @@ function RunContextSidecar({
     contextBundle || continuity?.takeoverPacket
   ].filter(Boolean).length;
   const nextCommand =
+    takeoverSummary?.nextStep?.command ||
     continuity?.takeoverPacket?.nextCommand ||
     continuity?.agentContextBundle?.quickStart?.nextCommand ||
     continuity?.continuityAudit?.nextCommand ||
-    "cat .project-agent/continuity.json";
+    "jq '{currentState,nextStep,risks}' .project-agent/takeover-summary.json";
   const changedSummary = changedFiles.length
     ? `${changedFiles.length} recent file${changedFiles.length === 1 ? "" : "s"}`
     : impactFolders.length
       ? `${impactFolders.length} changed area${impactFolders.length === 1 ? "" : "s"}`
       : "No tracked changes";
+  const primaryRisk = takeoverSummary?.risks?.[0] || (preEditRisk ? { id: "pre_edit_risk", tone: riskTone(preEditRisk.status), summary: preEditRisk.summary || preEditRisk.nextAction } : null);
+  const takeoverStatus = takeoverSummary?.takeover || null;
   const actionLabel = canComplete ? "Complete" : "Handoff";
   const openProjectMap = (view) => {
     setMapView(view);
@@ -3190,101 +3238,38 @@ function RunContextSidecar({
 
       <div className="sidecar-lines">
         <SidecarLine
-          title="Kernel"
-          value={`${kernelSignals}/5 layers`}
-          meta={contextBundle?.readOrder?.[0] || ".project-agent/agent-context-bundle.json"}
-          tone={kernelSignals >= 4 ? "ok" : "warn"}
-          onClick={() => openProjectMap("kernel")}
+          title="Goal"
+          value={state.activeGoal?.status || "No goal"}
+          meta={state.activeGoal?.objective || "Create or select an active objective"}
+          tone={state.activeGoal ? "ok" : "warn"}
+          onClick={() => setOpenDrawer("settings")}
         />
         <SidecarLine
-          title="Changed"
-          value={preEditRisk?.status ? `${preEditRisk.status} pre-edit risk` : changedSummary}
-          meta={preEditRisk?.nextAction || (impactFolders[0]?.folder ? `Focus ${impactFolders[0].folder === "." ? "repo root" : impactFolders[0].folder}` : changedFiles[0]?.path)}
-          tone={preEditRisk ? riskTone(preEditRisk.status) : changedFiles.length || impactFolders.length ? "warn" : "ok"}
-          onClick={() => openProjectMap("architecture")}
+          title="State"
+          value={current?.title || "No cursor"}
+          meta={eventDetail(current) || "Process cursor is missing"}
+          tone={current?.title ? "ok" : "warn"}
+          onClick={() => openProjectMap("process")}
         />
         <SidecarLine
-          title="Graph"
-          value={codeGraph?.nodeCount ? `${codeGraph.status} ${codeGraph.localEdgeCount || 0}/${codeGraph.nodeCount}` : "Code graph"}
-          meta={codeGraph?.changedImpact?.[0]?.nextAction || codeGraph?.summary || "Dependency impact"}
-          tone={codeGraph ? codeGraphTone(codeGraph.status) : "warn"}
-          onClick={() => openProjectMap("graph")}
-        />
-        <SidecarLine
-          title="Memory"
-          value={`${memoryCount} nodes`}
-          meta={memoryGraph?.edgeCount || memoryGraph?.edges?.length ? `${memoryGraph?.edgeCount || memoryGraph?.edges?.length} links` : "graph ready"}
-          tone={memoryCount ? "ok" : "warn"}
-          onClick={() => openProjectMap("memory")}
-        />
-        <SidecarLine
-          title="Focus"
-          value={attentionPack?.status ? `${attentionPack.status} pack` : "Attention pack"}
-          meta={attentionPack?.items?.[0]?.label || attentionPack?.summary || "Top-of-mind handoff context"}
-          tone={attentionPack ? attentionTone(attentionPack.status) : "warn"}
+          title="Next"
+          value={nextCommand ? "Command ready" : "Need next step"}
+          meta={nextCommand || next?.title || "Inspect takeover packet"}
+          tone={nextCommand ? "ok" : "warn"}
           onClick={openHandoff}
         />
         <SidecarLine
-          title="Decisions"
-          value={decisionLedger?.decisionCount ? `${decisionLedger.status} ${decisionLedger.validCount || 0}/${decisionLedger.decisionCount}` : "Decision ledger"}
-          meta={decisionLedger?.nextAction || decisionLedger?.summary || "Temporal decision refs"}
-          tone={decisionLedger ? decisionTone(decisionLedger.status) : "warn"}
-          onClick={openHandoff}
-        />
-        <SidecarLine
-          title="Temporal"
-          value={temporalProvenance?.factCount ? `${temporalProvenance.status} ${temporalProvenance.validCount || 0}/${temporalProvenance.factCount}` : "Temporal provenance"}
-          meta={temporalProvenance?.nextAction || temporalProvenance?.summary || "Fact validity windows"}
-          tone={temporalProvenance ? temporalTone(temporalProvenance.status) : "warn"}
-          onClick={openHandoff}
-        />
-        <SidecarLine
-          title="Boundary"
-          value={stateBoundary?.status ? `${stateBoundary.status} state` : "State boundary"}
-          meta={stateBoundary?.nextAction || stateBoundary?.summary || "Source/index/disclosure split"}
-          tone={stateBoundary ? boundaryTone(stateBoundary.status) : "warn"}
+          title="Risk"
+          value={primaryRisk ? primaryRisk.id : changedSummary}
+          meta={primaryRisk?.summary || (impactFolders[0]?.folder ? `Focus ${impactFolders[0].folder === "." ? "repo root" : impactFolders[0].folder}` : changedFiles[0]?.path || "No blocker")}
+          tone={primaryRisk?.tone === "ok" ? "ok" : primaryRisk ? "warn" : changedFiles.length || impactFolders.length ? "warn" : "ok"}
           onClick={openHandoff}
         />
         <SidecarLine
           title="Resume"
-          value={handoffLifecycle?.status ? `Handoff ${handoffLifecycle.status}` : acceptanceReady ? "Another agent can continue" : "Needs a handoff check"}
-          meta={handoffLifecycle?.nextAction || takeoverAcceptanceAudit?.score || continuity?.continuityAudit?.score || nextCommand}
-          tone={handoffLifecycle ? lifecycleTone(handoffLifecycle.status) : acceptanceReady ? "ok" : "warn"}
-          onClick={openHandoff}
-        />
-        <SidecarLine
-          title="Fresh"
-          value={freshnessGate?.status ? `${freshnessGate.status} state` : "Freshness gate"}
-          meta={freshnessGate?.validity?.validUntil ? `valid until ${freshnessGate.validity.validUntil}` : freshnessGate?.summary || "Check state timestamps"}
-          tone={freshnessGate ? freshnessTone(freshnessGate.status) : "warn"}
-          onClick={openHandoff}
-        />
-        <SidecarLine
-          title="Ledger"
-          value={phaseLedger?.status ? `${phaseLedger.status} ${phaseLedger.linkedCount || 0}/${phaseLedger.spanCount || 0}` : "Phase ledger"}
-          meta={phaseLedger?.nextAction || phaseLedger?.summary || "Parent/child span trace"}
-          tone={phaseLedger ? phaseTone(phaseLedger.status) : "warn"}
-          onClick={openHandoff}
-        />
-        <SidecarLine
-          title="Checkpoint"
-          value={checkpointLedger?.status ? `${checkpointLedger.status} ${checkpointLedger.resumableCount || 0}/${checkpointLedger.checkpointCount || 0}` : "Checkpoint ledger"}
-          meta={checkpointLedger?.nextAction || checkpointLedger?.summary || "Resumable run points"}
-          tone={checkpointLedger ? checkpointTone(checkpointLedger.status) : "warn"}
-          onClick={openHandoff}
-        />
-        <SidecarLine
-          title="Hooks"
-          value={hookIngressAudit?.acceptedEvents ? `${hookIngressAudit.acceptedEvents} accepted` : "Hook ingress"}
-          meta={hookIngressAudit?.summary || "Sanitized external events"}
-          tone={hookIngressAudit ? hookTone(hookIngressAudit.status) : "warn"}
-          onClick={openHandoff}
-        />
-        <SidecarLine
-          title="Disclose"
-          value={disclosureLabel}
-          meta={disclosureGate?.summary || "Check prompt budget and secret-like content"}
-          tone={disclosureTone}
+          value={takeoverStatus?.status || (acceptanceReady ? "ready" : "watch")}
+          meta={takeoverStatus?.summary || handoffLifecycle?.nextAction || takeoverAcceptanceAudit?.score || continuity?.continuityAudit?.score || "Run handoff check"}
+          tone={(takeoverStatus?.canTakeOver ?? acceptanceReady) ? "ok" : "warn"}
           onClick={openHandoff}
         />
       </div>
@@ -3338,6 +3323,7 @@ function RunContextSidecar({
       <details className="sidecar-drawer" open={openDrawer === "handoff"} onToggle={toggleDrawer("handoff")}>
         <summary>Handoff packet</summary>
         <div className="sidecar-map">
+          <TakeoverSummaryPanel summary={takeoverSummary} />
           <HandoffPrimerPanel continuity={continuity} contract={continuityContract} acceptanceAudit={takeoverAcceptanceAudit} />
           <HandoffLifecyclePanel lifecycle={handoffLifecycle} />
           <AttentionPackPanel pack={attentionPack} />
@@ -3830,7 +3816,6 @@ export default function App({ TerminalClass, FitAddonClass }) {
       const result = await api(`/handoff/${activeGoalId || state.activeGoal?.id}`);
       setHandoff(result.markdown);
     });
-
   const selectedGoal = useMemo(() => {
     if (!activeGoalId) return state.activeGoal;
     return state.goals.find((goal) => goal.id === activeGoalId) || state.activeGoal;

@@ -22,8 +22,11 @@ import {
   readGovernanceSpec,
   readStateManifest,
   readAgentContextBundle,
+  readTakeoverSummary,
   buildAgentContextBundle,
+  buildTakeoverSummary,
   writeAgentContextBundle,
+  writeTakeoverSummary,
   verifyAgentContextBundle,
   buildStateManifest,
   writeStateManifest,
@@ -42,11 +45,14 @@ import { buildResumePacket } from "./resume.js";
 import { buildNextAgentPrompt } from "./next-agent-prompt.js";
 import { buildAgentContextPrompt } from "./agent-context-prompt.js";
 import { runAgentContextDrill, writeAgentContextDrill } from "./agent-context-drill.js";
+import { readCodexTakeoverSmoke, runCodexTakeoverSmoke } from "./codex-takeover-smoke.js";
 import { architectureEventsFromChanges, startArchitectureWatcher } from "./architecture-watcher.js";
 import { createAutoHandoffSnapshot } from "./handoff-snapshot.js";
 import { attachTakeoverDrill } from "./takeover-drill.js";
 import { buildContinuityAudit, writeContinuityAudit } from "./continuity-audit.js";
 import { refreshTakeoverAcceptanceAudit } from "./takeover-acceptance-audit.js";
+import { defaultContextQuery, readContextRef, searchContext } from "./grep-context.js";
+import { buildCliAgentCommand, resolveCodexCli, writeCliAgentBootstrap } from "./cli-agent-bootstrap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(__dirname, "..");
@@ -146,7 +152,8 @@ app.get("/api/continuity", (req, res) => {
   const continuity = readContinuity(projectDir) || {};
   res.json({
     ...continuity,
-    stateManifest: readStateManifest(projectDir) || continuity.stateManifest || null
+    stateManifest: readStateManifest(projectDir) || continuity.stateManifest || null,
+    takeoverSummary: readTakeoverSummary(projectDir) || continuity.takeoverSummary || null
   });
 });
 
@@ -188,11 +195,58 @@ app.get("/api/agent-context-bundle", (req, res) => {
       stateManifest,
       stateManifestVerification: verifyStateManifest(projectDir, stateManifest)
     }));
-    res.json({ agentContextBundle: bundle, verification: verifyAgentContextBundle(projectDir, bundle) });
+    const verification = verifyAgentContextBundle(projectDir, bundle);
+    const takeoverSummary = writeTakeoverSummary(projectDir, buildTakeoverSummary(projectDir, continuity, { bundle, verification }));
+    res.json({ agentContextBundle: bundle, takeoverSummary, verification });
     return;
   }
   const agentContextBundle = readAgentContextBundle(projectDir) || null;
   res.json({ agentContextBundle, verification: verifyAgentContextBundle(projectDir, agentContextBundle) });
+});
+
+app.get("/api/takeover-summary", (req, res) => {
+  const continuity = readContinuity(projectDir) || {};
+  const bundle = readAgentContextBundle(projectDir) || buildAgentContextBundle(projectDir, continuity);
+  const verification = verifyAgentContextBundle(projectDir, bundle);
+  if (req.query.write === "1" || req.query.write === "true") {
+    const takeoverSummary = writeTakeoverSummary(projectDir, buildTakeoverSummary(projectDir, continuity, { bundle, verification }));
+    res.json({ takeoverSummary, verification });
+    return;
+  }
+  res.json({ takeoverSummary: readTakeoverSummary(projectDir) || buildTakeoverSummary(projectDir, continuity, { bundle, verification }), verification });
+});
+
+app.get("/api/context-read", (req, res) => {
+  try {
+    res.json(readContextRef(projectDir, req.query.ref || "", {
+      maxBytes: Number(req.query.maxBytes || 12000)
+    }));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get("/api/context-search", (req, res) => {
+  const query = req.query.query || req.query.q || defaultContextQuery(projectDir);
+  res.json(searchContext(projectDir, {
+    query,
+    limit: Number(req.query.limit || 10),
+    maxFiles: Number(req.query.maxFiles || 500),
+    maxFileBytes: Number(req.query.maxFileBytes || 1024 * 1024)
+  }));
+});
+
+app.get("/api/cli-agent-bootstrap", (req, res) => {
+  const bootstrap = writeCliAgentBootstrap(projectDir, {
+    appRoot,
+    role: req.query.role || "coding_agent",
+    query: req.query.query
+  });
+  res.json({
+    ...bootstrap,
+    command: buildCliAgentCommand(projectDir, { model: req.query.model }),
+    codexCli: resolveCodexCli() || null
+  });
 });
 
 app.get("/api/agent-context-prompt", (req, res) => {
@@ -213,6 +267,22 @@ app.get("/api/agent-context-drill", (req, res) => {
     return;
   }
   res.json({ drill: runAgentContextDrill(projectDir), file: null });
+});
+
+app.get("/api/codex-takeover-smoke", (req, res) => {
+  const smoke = readCodexTakeoverSmoke(projectDir);
+  res.json({ smoke, file: smoke?.file || null });
+});
+
+app.post("/api/codex-takeover-smoke", (req, res) => {
+  const result = runCodexTakeoverSmoke(projectDir, {
+    runCodex: req.body?.noCodex ? false : req.body?.runCodex !== false,
+    writeSummary: req.body?.write !== false,
+    timeoutMs: Number(req.body?.timeoutMs || 120000)
+  });
+  broadcastAppEvent({ type: "runtime-event", reason: "codex-takeover-smoke", updatedAt: new Date().toISOString() });
+  autoHandoffSnapshot?.schedule("codex-takeover-smoke");
+  res.json({ smoke: result });
 });
 
 app.get("/api/graph-trace", (req, res) => {

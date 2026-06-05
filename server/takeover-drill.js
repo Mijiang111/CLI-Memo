@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { readContinuity, readContinuityContract, readGovernanceSpec, writeContinuity } from "./runtime-state.js";
 
-const REQUIRED_READ_FIRST = new Set([".project-agent/agent-context-bundle.json", ".project-agent/governance-spec.json", ".project-agent/continuity-contract.json", ".project-agent/agent-runbook.json", ".project-agent/memory-graph.json", ".project-agent/process-trace.json", ".project-agent/development-trail.json", ".project-agent/architecture-map.json", ".project-agent/takeover-packet.json", ".project-agent/continuity-audit.json", ".project-agent/state-manifest.json", ".project-agent/continuity.json", ".project-agent/state.json", "AGENTS.md", "PROJECT.md"]);
+const REQUIRED_READ_FIRST = new Set([".project-agent/takeover-summary.json", ".project-agent/context-starter-prompt.md", ".project-agent/takeover-packet.json", ".project-agent/process-trace.json", ".project-agent/architecture-map.json", ".project-agent/agent-context-bundle.json", ".project-agent/governance-spec.json", ".project-agent/continuity-contract.json", ".project-agent/agent-runbook.json", ".project-agent/memory-graph.json", ".project-agent/development-trail.json", ".project-agent/continuity-audit.json", ".project-agent/state-manifest.json", ".project-agent/continuity.json", ".project-agent/state.json", "AGENTS.md", "PROJECT.md"]);
 const EXTERNAL_REF_PATTERNS = [/^https?:\/\//i, /^wss?:\/\//i, /^\/api\//, /^npm\s+/, /^node\s+/, /^takeoverReadiness$/];
 
 function nowIso() {
@@ -137,10 +137,20 @@ export function runTakeoverDrill(projectDir, continuity = readContinuity(project
     why: "Product-level AI-native development requirements; read this before interpreting state.",
     lookFor: "requirements, acceptance, operatingRules, influences, readFirst"
   };
+  const takeoverSummaryReadFirst = {
+    path: ".project-agent/takeover-summary.json",
+    why: "Small cold-start takeover summary; read this before the full bundle or continuity file.",
+    lookFor: "activeGoal, currentState, nextStep, risks, budgets, sourceRefs, onDemandReads"
+  };
+  const contextStarterReadFirst = {
+    path: ".project-agent/context-starter-prompt.md",
+    why: "Human-readable starter prompt generated from the small takeover summary.",
+    lookFor: "takeover gate, mission, current state, next step, on-demand reads"
+  };
   const contextBundleReadFirst = {
     path: ".project-agent/agent-context-bundle.json",
-    why: "Single-file takeover index tying memory, process, architecture, governance, audit, and validation together.",
-    lookFor: "quickStart, governance, memory.graph, process.trace, architecture.map, validation.stateManifestVerification, validation.freshnessGate"
+    why: "Budgeted takeover index; read selected fields only after the summary points to a need.",
+    lookFor: "quickStart, budget reports, validation.attentionPack, validation.freshnessGate"
   };
   const contractReadFirst = {
     path: ".project-agent/continuity-contract.json",
@@ -172,13 +182,18 @@ export function runTakeoverDrill(projectDir, continuity = readContinuity(project
     why: "Durable architecture tree, changed folders, files, and inspect order.",
     lookFor: "tree, files, recentChanges, impact, trace, inspectOrder"
   };
+  const takeoverPacketReadFirst = {
+    path: ".project-agent/takeover-packet.json",
+    why: "Concise action packet with cursor, next command, first actions, and guardrails.",
+    lookFor: "cursor, nextCommand, firstActions, firstRead, guardrails"
+  };
   const stateManifestReadFirst = {
     path: ".project-agent/state-manifest.json",
     why: "Hash manifest proving the handoff files belong to one readable state snapshot.",
     lookFor: "aggregateHash, files, sha256, schemaVersion, missing"
   };
   const rawReadFirst = asArray(startProtocol.readFirst);
-  const requiredReadFirst = [contextBundleReadFirst, governanceSpecReadFirst, contractReadFirst, runbookReadFirst, memoryGraphReadFirst, processTraceReadFirst, developmentTrailReadFirst, architectureMapReadFirst, stateManifestReadFirst];
+  const requiredReadFirst = [takeoverSummaryReadFirst, contextStarterReadFirst, takeoverPacketReadFirst, processTraceReadFirst, architectureMapReadFirst, contextBundleReadFirst, contractReadFirst, stateManifestReadFirst];
   const readFirst = [
     ...requiredReadFirst,
     ...rawReadFirst.filter((item) => !requiredReadFirst.some((required) => readFirstPath(item) === required.path))
@@ -189,7 +204,7 @@ export function runTakeoverDrill(projectDir, continuity = readContinuity(project
   const impactedFolders = asArray(packet.architectureImpact?.topFolders || packet.architectureImpact?.folders);
   const takeoverPacketPathRef = ".project-agent/takeover-packet.json";
   const continuityAuditPathRef = ".project-agent/continuity-audit.json";
-  const stateRefs = [...new Set([contextBundleReadFirst.path, governanceSpecReadFirst.path, contractReadFirst.path, runbookReadFirst.path, memoryGraphReadFirst.path, processTraceReadFirst.path, developmentTrailReadFirst.path, architectureMapReadFirst.path, takeoverPacketPathRef, continuityAuditPathRef, stateManifestReadFirst.path, ...asArray(packet.stateRefs)])];
+  const stateRefs = [...new Set([takeoverSummaryReadFirst.path, contextStarterReadFirst.path, takeoverPacketPathRef, processTraceReadFirst.path, architectureMapReadFirst.path, contextBundleReadFirst.path, contractReadFirst.path, stateManifestReadFirst.path, governanceSpecReadFirst.path, runbookReadFirst.path, memoryGraphReadFirst.path, developmentTrailReadFirst.path, continuityAuditPathRef, ...asArray(packet.stateRefs)])];
   const readiness = packet.takeoverReadiness;
   const continuityFile = pathState(projectDir, ".project-agent/continuity.json", expectedFiles);
   const readFirstSummary = summarizeReadFirst(projectDir, readFirst, expectedFiles);
@@ -389,6 +404,7 @@ export function runTakeoverDrill(projectDir, continuity = readContinuity(project
       agentRunbook: packet.agentRunbook || packet.continuityContract?.agentRunbook || null,
       changedFiles: changedFiles.slice(0, 8),
       impactedFolders: impactedFolders.slice(0, 6),
+      stateRefs: stateRefs.slice(0, 24),
       expectedFiles: [...expectedFiles]
     }
   };

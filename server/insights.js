@@ -520,18 +520,21 @@ function isFreshEvent(event) {
 function isInternalGeneratedEvent(event = {}) {
   const files = Array.isArray(event.files) ? event.files : [];
   if (!files.length) return false;
-  const allInternal = files.every((file) => INTERNAL_EVENT_FILES.has(file.path));
+  const allInternal = files.every((file) => String(file.path || "").startsWith(".project-agent/") || INTERNAL_EVENT_FILES.has(file.path));
   return allInternal && /^(architecture|handoff|auto|agent-run)/.test(String(event.source || ""));
 }
 
 function normalizeEvent(event) {
   const files = Array.isArray(event.files) ? event.files : [];
+  const status = event.source === "codex-takeover-smoke" && event.status === "current" && event.endedAt
+    ? "done"
+    : event.status || "done";
   const normalized = {
     id: event.id,
     at: event.at,
     phase: event.phase || "observe",
     title: event.title || "Event",
-    status: event.status || "done",
+    status,
     detail: event.detail || files.map((file) => [file.path, file.summary].filter(Boolean).join(" ")).join(", "),
     refs: event.refs || [],
     files,
@@ -1910,11 +1913,31 @@ function buildHookIngressAudit(process = {}) {
 
 function buildStartProtocol({ takeoverReadiness, goal, process, changedFiles, architecture, stateRefs, interruptedWork }) {
   const topFolders = architecture?.impact?.topFolders || architecture?.impact?.folders || [];
+  const leanReadFirstPaths = new Set([
+    ".project-agent/takeover-summary.json",
+    ".project-agent/context-starter-prompt.md",
+    ".project-agent/takeover-packet.json",
+    ".project-agent/process-trace.json",
+    ".project-agent/architecture-map.json",
+    ".project-agent/agent-context-bundle.json",
+    ".project-agent/continuity-contract.json",
+    ".project-agent/state-manifest.json"
+  ]);
   const readFirst = [
     {
+      path: ".project-agent/takeover-summary.json",
+      why: "Small cold-start takeover summary; read this before full bundle or continuity files.",
+      lookFor: "activeGoal, currentState, nextStep, risks, budgets, sourceRefs, onDemandReads"
+    },
+    {
+      path: ".project-agent/context-starter-prompt.md",
+      why: "Human-readable starter prompt generated from the small takeover summary.",
+      lookFor: "takeover gate, mission, current state, next step, memory budget, on-demand reads"
+    },
+    {
       path: ".project-agent/agent-context-bundle.json",
-      why: "Single-file takeover index tying memory graph, process trace, architecture map, governance, audit, and manifest verification together.",
-      lookFor: "quickStart, governance, memory.graph, process.trace, architecture.map, validation.stateManifestVerification, validation.freshnessGate"
+      why: "Budgeted takeover index; read selected fields only after the summary points to a need.",
+      lookFor: "quickStart, section budgets, validation.attentionPack, validation.freshnessGate"
     },
     {
       path: ".project-agent/governance-spec.json",
@@ -2016,7 +2039,7 @@ function buildStartProtocol({ takeoverReadiness, goal, process, changedFiles, ar
       why: "Architecture source of truth.",
       lookFor: "architecture principles and durable constraints"
     }
-  ].filter((item) => !stateRefs?.length || stateRefs.includes(item.path));
+  ].filter((item) => leanReadFirstPaths.has(item.path)).filter((item) => !stateRefs?.length || stateRefs.includes(item.path));
 
   const interruptedAction = interruptedWork?.count
     ? [
@@ -2097,12 +2120,20 @@ function buildAgentRunbook({ goal, processTrace, architectureTrace, graphTrace, 
   const commandProject = "$PROJECT_DIR";
   const baseSteps = [
     {
-      id: "read_context_bundle",
+      id: "read_takeover_summary",
       state: "cold_start",
-      label: "Read the agent context bundle",
-      command: "cat .project-agent/agent-context-bundle.json",
+      label: "Read the takeover summary",
+      command: "jq '{activeGoal,currentState,nextStep,takeover,risks,budgets,onDemandReads}' .project-agent/takeover-summary.json",
+      refs: [".project-agent/takeover-summary.json", ".project-agent/context-starter-prompt.md"],
+      success: "active goal, current state, next step, risks, budgets, and source refs are understood without loading full state."
+    },
+    {
+      id: "inspect_budgeted_context",
+      state: "cold_start",
+      label: "Inspect budgeted context fields",
+      command: "jq '{quickStart,validation:{agentContextBundleVerification,attentionPack,preEditRisk,freshnessGate},memory:{budget},process:{budget},architecture:{budget},handoff:{budget}}' .project-agent/agent-context-bundle.json",
       refs: [".project-agent/agent-context-bundle.json"],
-      success: "quickStart, memory graph, process trace, architecture map, validation, and nextCommand are understood."
+      success: "quickStart and section budgets are understood without reading full embedded state."
     },
     {
       id: "read_contract",
@@ -2141,7 +2172,7 @@ function buildAgentRunbook({ goal, processTrace, architectureTrace, graphTrace, 
       id: "inspect_architecture",
       state: "inspect_project_shape",
       label: "Inspect changed architecture and protected files",
-      command: "cat .project-agent/continuity.json",
+      command: "jq '{totals,impact,recentChanges:.recentChanges[0:12],inspectOrder:.inspectOrder[0:16]}' .project-agent/architecture-map.json",
       refs: [...new Set([...architectureRefs, ...changedRefs])].slice(0, 10),
       success: "architectureTrace.inspectOrder, architectureImpact.topFolders, and changedFiles have been checked."
     },
@@ -2248,7 +2279,7 @@ function buildAgentRunbook({ goal, processTrace, architectureTrace, graphTrace, 
       initial: "cold_start",
       current: currentState,
       transitions: [
-        { from: "cold_start", to: "validate_takeover", gate: "agent-context-bundle.json and continuity-contract.json are readable, and state-manifest verification is ok" },
+        { from: "cold_start", to: "validate_takeover", gate: "takeover-summary.json, continuity-contract.json, and state-manifest verification are readable" },
         { from: "validate_takeover", to: hasInterrupted ? "resolve_interrupted_work" : "inspect_project_shape", gate: "takeoverDrill.canResume is true" },
         { from: "resolve_interrupted_work", to: "inspect_project_shape", gate: "interruptedWork items are closed, continued, or intentionally replaced" },
         { from: "inspect_project_shape", to: "claim_work", gate: "changedFiles and architectureTrace.inspectOrder are reviewed" },
@@ -4303,16 +4334,18 @@ function buildContinuity({ projectDir = "", summary, packet, currentStep, proces
     .filter((criterion) => !evidenceVerifies(summary.evidence || [], criterion.id))
     .map((criterion) => ({ id: criterion.id, statement: criterion.statement }));
   const stateRefs = [
+    ".project-agent/takeover-summary.json",
+    ".project-agent/context-starter-prompt.md",
+    ".project-agent/takeover-packet.json",
+    ".project-agent/process-trace.json",
+    ".project-agent/architecture-map.json",
     ".project-agent/agent-context-bundle.json",
     ".project-agent/governance-spec.json",
     ".project-agent/continuity-contract.json",
     ".project-agent/agent-runbook.json",
     ".project-agent/memory-graph.json",
-    ".project-agent/process-trace.json",
     ".project-agent/development-trail.json",
-    ".project-agent/architecture-map.json",
     ".project-agent/state-manifest.json",
-    ".project-agent/takeover-packet.json",
     ".project-agent/continuity-audit.json",
     ".project-agent/takeover-acceptance-audit.json",
     ".project-agent/next-agent-prompt.md",
@@ -4505,11 +4538,13 @@ function buildContinuity({ projectDir = "", summary, packet, currentStep, proces
     continuityContract,
     stateRefs,
     nextAgentInstructions: [
-      "Start with .project-agent/continuity-contract.json; it is the agent-neutral takeover contract.",
-      "Read .project-agent/governance-spec.json to understand the product-level requirements before editing.",
-      "Read .project-agent/agent-runbook.json for executable takeover steps, commands, and proof gates.",
+      "Start with .project-agent/takeover-summary.json; it is the small cold-start packet.",
+      "Read .project-agent/context-starter-prompt.md for the summary-first human starter prompt.",
+      "Use .project-agent/takeover-summary.json#onDemandReads or jq commands to inspect only needed fields from larger files.",
+      "Read .project-agent/continuity-contract.json after the summary; it is the agent-neutral takeover contract.",
+      "Read .project-agent/agent-runbook.json only when executable takeover steps, commands, or proof gates are needed.",
       "Follow startProtocol.readFirst and startProtocol.firstActions before editing.",
-      "Read .project-agent/continuity.json after the runbook, then .project-agent/resume.md or .project-agent/recovery.md, then .project-agent/state.json.",
+      "Do not default to full .project-agent/continuity.json; read fields such as phaseLedger, checkpointLedger, decisionLedger, temporalProvenance, or stateBoundary on demand.",
       "Check agentLeases; stale active agents may indicate a crashed prior session.",
       "Check handoffSnapshot; a recent done snapshot means resume.md and recovery.md are current.",
       "Check handoffLifecycle; accepted means a new agent may resume, open means refresh/check first, expired means do not trust the handoff.",

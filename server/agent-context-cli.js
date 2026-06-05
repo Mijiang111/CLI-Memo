@@ -2,12 +2,15 @@
 import path from "node:path";
 import {
   buildAgentContextBundle,
+  buildTakeoverSummary,
   readAgentContextBundle,
   readContinuity,
   readStateManifest,
+  readTakeoverSummary,
   verifyAgentContextBundle,
   verifyStateManifest,
-  writeAgentContextBundle
+  writeAgentContextBundle,
+  writeTakeoverSummary
 } from "./runtime-state.js";
 
 const args = process.argv.slice(2);
@@ -24,12 +27,13 @@ function has(flag) {
 
 if (has("--help") || has("-h")) {
   console.log(`Usage:
-  node server/agent-context-cli.js --project-dir /path/to/project [--write] [--verify]
+  node server/agent-context-cli.js --project-dir /path/to/project [--write] [--verify] [--full]
 
 Options:
   --project-dir PATH   Project root containing .project-agent
   --write              Refresh .project-agent/agent-context-bundle.json
-  --verify             Verify bundle-only takeover readiness
+  --verify             Verify takeover readiness
+  --full               Print the full agent-context-bundle instead of the small takeover summary
 `);
   process.exit(0);
 }
@@ -43,5 +47,8 @@ const bundle = has("--write")
   : readAgentContextBundle(projectDir) || buildAgentContextBundle(projectDir, continuity, { stateManifest, stateManifestVerification });
 
 const verification = verifyAgentContextBundle(projectDir, bundle);
-console.log(JSON.stringify({ agentContextBundle: bundle, verification }, null, 2));
+const takeoverSummary = has("--write")
+  ? writeTakeoverSummary(projectDir, buildTakeoverSummary(projectDir, continuity, { bundle, verification }))
+  : readTakeoverSummary(projectDir) || buildTakeoverSummary(projectDir, continuity, { bundle, verification });
+console.log(JSON.stringify(has("--full") ? { agentContextBundle: bundle, takeoverSummary, verification } : { takeoverSummary, verification }, null, 2));
 if (has("--verify") && !verification.canResume) process.exit(2);
