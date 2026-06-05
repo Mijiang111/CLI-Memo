@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.project-agent/
+smoke-project/
+.DS_Store
+*.log

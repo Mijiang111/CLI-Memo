@@ -1,0 +1,31 @@
+# Agent Continuity Protocol
+
+- Start by reading `.project-agent/agent-context-bundle.json`, then `.project-agent/context-starter-prompt.md`, then `.project-agent/context-takeover-drill.json`, then `.project-agent/governance-spec.json`, then `.project-agent/continuity-contract.json`, then `.project-agent/agent-runbook.json`, then `.project-agent/memory-graph.json`, then `.project-agent/process-trace.json`, then `.project-agent/development-trail.json`, then `.project-agent/architecture-map.json`, then `.project-agent/state-manifest.json`, then `.project-agent/takeover-packet.json`, then `.project-agent/continuity-audit.json`, then `.project-agent/takeover-acceptance-audit.json`, then `.project-agent/next-agent-prompt.md`, then `.project-agent/continuity.json`.
+- If `.project-agent/resume.md` exists, read it after `continuity.json`; if `.project-agent/recovery.md` exists, read it after `resume.md`.
+- In `.project-agent/governance-spec.json`, inspect `requirements`, `acceptance`, `operatingRules`, and `influences` before editing.
+- In `.project-agent/continuity-contract.json`, inspect `resume`, `capabilities`, `inspectOrder`, and `proofChecklist` before editing.
+- In `.project-agent/agent-context-bundle.json`, inspect `quickStart`, `memory.graph`, `process.trace`, `architecture.map`, `governance`, `validation.objectiveCoverage`, and `validation.stateManifestVerification` for the one-file takeover index.
+- Before trusting the bundle as a cold-start handoff, run `npm run context -- --project-dir "$PROJECT_DIR" --verify` from the terminal UI package and treat a nonzero exit as a blocked takeover.
+- Use `.project-agent/context-starter-prompt.md` as the bundle-only starter prompt when the next agent must start from the single-file context bundle; do not treat it as a substitute for the JSON source-of-truth files.
+- Use `.project-agent/context-takeover-drill.json` to rehearse the replacement agent's first actions from the bundle only.
+- In `.project-agent/continuity.json`, follow `startProtocol.readFirst`, `startProtocol.firstActions`, `continuityContract`, and `takeoverReadiness` before editing.
+- In `.project-agent/takeover-packet.json`, inspect `cursor`, `nextCommand`, `firstRead`, `firstActions`, `guardrails`, and `interruptedWork` before editing.
+- In `.project-agent/continuity-audit.json`, inspect `status`, `canResume`, `score`, `checks`, `blockers`, and `warnings`; restore bad artifacts before editing.
+- In `.project-agent/takeover-acceptance-audit.json`, inspect `rows`, `score`, `blockers`, and `warnings` to verify the user objective: visible memory, dynamic process, managed architecture, and crash-proof handoff.
+- In `.project-agent/state-manifest.json`, inspect `aggregateHash`, `files`, `sha256`, and `missing` to confirm the handoff files form one coherent snapshot. Before trusting handoff state, run `npm run manifest -- --project-dir "$PROJECT_DIR" --verify` from the terminal UI package and treat a nonzero exit as a blocked takeover.
+- Use `.project-agent/next-agent-prompt.md` as the paste-ready starter prompt for a replacement agent; do not treat it as a substitute for the JSON source-of-truth files.
+- In `.project-agent/process-trace.json`, inspect `previous`, `current`, `next`, `inspectOrder`, and `filesTouched` before running the next tool.
+- In `.project-agent/development-trail.json`, inspect `steps`, `current`, `folders`, `files`, `risk`, and `inspectOrder` to connect the live process to architecture edits.
+- In `.project-agent/architecture-map.json`, inspect `tree`, `recentChanges`, `impact`, and `inspectOrder` before editing changed folders or files.
+- If a prior session JSONL/log exists, import it through the session log adapter before making new edits.
+- Use `PROJECT.md` and `docs/` as source-of-truth project philosophy, architecture, product, quality, and role context.
+- Inspect `workstreams`, `processCursor`, `previousEvent`, and `nextEvent` to understand whether the current work is discussion, strategy, architecture, code development, QA/testing, or governance.
+- Inspect `architectureImpact.topFolders` before editing; those folders changed most recently or carry higher architectural priority.
+- Inspect `changedFiles` in continuity before editing; do not overwrite half-finished work.
+- Check `agentLeases` in continuity; a stale active lease may indicate a crashed prior agent.
+- Publish an agent heartbeat while working when the terminal wrapper or local adapter is available.
+- Prefer `npm run agent-run -- -- <command>` from the terminal wrapper when running external commands; it records current/done/failed events, changed files, and a fresh handoff snapshot automatically.
+- Treat `.project-agent/resume.md` and `.project-agent/recovery.md` as auto-refreshed handoff snapshots when the terminal wrapper is running.
+- Report live work through the event ingest API or local adapter when a tool call, file change, test, audit, or handoff begins or completes.
+- Treat acceptance criteria, evidence, audit, and handoff as the completion contract.
+- Save durable discoveries as project memory and generate a handoff before ending the session.
