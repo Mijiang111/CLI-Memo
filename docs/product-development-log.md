@@ -1,12 +1,14 @@
 # Project Agent Terminal 产品开发日志
 
 日期：2026-06-05  
-本地提交：`69044ef chore: snapshot project agent terminal`  
-当前状态：已完成本地 git snapshot；远端 `origin` 尚未配置，暂不能 push 到 GitHub。
+最新本地提交：`8432ebc feat: add git freshness audit`  
+当前状态：本地 git 提交链已整理；远端 `origin` 尚未配置，暂不能 push 到 GitHub。
 
-更新：State Boundary Audit 已进入实现链路，覆盖 continuity、continuity contract、agent context bundle validation、provenance ledger、attention pack、starter prompts、Handoff UI 和 smoke tests。它把 raw events、durable sources、derived indexes、disclosure outputs 明确分层，避免把 prompt/resume/graph index 误当成唯一真相。
+更新：State Boundary Audit 已落地到 continuity、continuity contract、agent context bundle validation、provenance ledger、attention pack、starter prompts、Handoff UI 和 smoke tests。它把 raw events、durable sources、derived indexes、disclosure outputs 明确分层，避免把 prompt/resume/graph index 误当成唯一真相。
 
 更新：Git Freshness Audit 已接入 freshness gate。系统会读取 git HEAD、branch、dirty tree、untracked files 和 state-file changes，并把结果写入 continuity、bundle、starter prompts、Handoff UI 和 smoke tests。dirty tree 不会直接阻断接管，但会作为 freshness warning，提醒下一位 agent 在声称可复现 handoff 前先 review、commit 或 stash。
+
+更新：本轮产品工作已经从“能恢复上下文”推进到“能解释这个上下文是否可信”。State Boundary 负责区分真相源和披露层；Git Freshness 负责把 handoff snapshot 和当前 repo 快照对齐。这两个能力让 Project Agent Terminal 更接近一个 agent control plane，而不是单纯的 resume 文件生成器。
 
 ## 一、产品定位
 
@@ -93,6 +95,26 @@ Benchmark 结论已经沉淀在 `docs/research/agent-governance-landscape.md`。
 
 产品价值：外部 hook 不再是黑盒输入；它有边界、有拒绝记录、有压力状态。
 
+### 8. State Boundary Audit
+
+根据 Akita 的 source/index 分层和 RepoWise 的 evidence discipline，新增 State Boundary Audit：
+
+- 将 raw events、durable sources、derived indexes、disclosure outputs 四层写入 continuity。
+- 在 continuity contract 中标出 source-of-truth、derived indexes 和 prompt disclosure。
+- 在 agent context bundle、starter prompt、next-agent prompt、Handoff UI 和 smoke test 中暴露边界检查。
+
+产品价值：下一个 agent 不会把 prompt、resume、graph preview 或 UI 摘要误当成唯一真相；系统会提示它回到 raw/durable source refs 进行验证。
+
+### 9. Git Freshness Audit
+
+根据 ravbyte handoff validator 的 git freshness 思路，新增 Git Freshness Audit：
+
+- 读取 git HEAD、branch、dirty tree、untracked files、state-file changes。
+- 在 freshness gate 中增加 `git_snapshot` 检查，并把 git 状态写入 continuity contract。
+- 在 prompt 和 Handoff UI 中显示当前 git 快照，帮助下一位 agent 判断接管状态是否仍然可复现。
+
+产品价值：handoff 不再只证明 `.project-agent/` 文件存在，还能说明它们和当前 repository snapshot 的关系。dirty tree 会成为接管前必须注意的 warning，而不是被隐藏在终端里。
+
 ## 四、当前验证状态
 
 上一轮完成后已验证：
@@ -100,7 +122,7 @@ Benchmark 结论已经沉淀在 `docs/research/agent-governance-landscape.md`。
 - `node --check` 通过相关 server 文件。
 - `npm run build` 通过，只有 Vite chunk size warning。
 - `PORT=4176 npm test` 通过，输出 `smoke ok`。
-- smoke test 覆盖 bundle endpoint、CLI、prompt 文件、final insights、UI source checks、hook backpressure、prompt packing gate。
+- smoke test 覆盖 bundle endpoint、CLI、prompt 文件、final insights、UI source checks、hook backpressure、prompt packing gate、state boundary audit、git freshness audit。
 - `.project-agent` 在 smoke 后没有残留。
 - `4176` 端口没有遗留 listener。
 
@@ -110,16 +132,19 @@ Benchmark 结论已经沉淀在 `docs/research/agent-governance-landscape.md`。
 
 `/Users/michael/Documents/Codex/2026-06-01/rohitg00-agentmemory-https-github-com-rohitg00/outputs/project-agent-terminal`
 
-已完成第一笔本地提交：
+已完成本地提交链：
 
 ```text
+8432ebc feat: add git freshness audit
+2612546 feat: add state boundary audit
+8dc80a6 docs: add product development log
 69044ef chore: snapshot project agent terminal
 ```
 
 推送状态：
 
-- `git push -u origin main` 已尝试。
-- 失败原因：当前 repo 没有配置 `origin` remote。
+- 当前 `git remote -v` 为空。
+- 失败原因：当前 repo 没有配置 `origin` remote，不能把本地提交 push 到 GitHub。
 - 需要补充远端，例如：
 
 ```bash
@@ -137,11 +162,11 @@ git push -u origin main
 
 ## 七、下一轮建议
 
-已产品化的下一项能力是 **State Boundary Audit**：
+下一项优先产品能力建议是 **Temporal Provenance Audit**：
 
-- 明确 raw events、durable sources、derived indexes、disclosure outputs 四层。
-- 在 continuity contract 里标出哪些文件是 source-of-truth，哪些只是 derived index。
-- 在 bundle validation 中增加 `stateBoundary` 检查。
-- 在 prompt 和 UI 里提示 agent：不要把 prompt、resume 或 derived graph 当成唯一真相，必须回到 raw/durable source refs。
+- 从 Graphiti 学习 `valid_at`、`invalid_at`、`expired_at` 的时间事实模型。
+- 为 memory graph、decision ledger、process trace 中的重要 fact 增加 validity window、source hash、observedAt 和 stale/invalid/watch 状态。
+- 在 continuity、bundle validation、provenance ledger、attention pack、starter prompt 和 Handoff UI 中暴露 temporal provenance。
+- 对被后续事件推翻、来源过期、source hash 不匹配的 fact 给出 contradiction/staleness warning。
 
-这个方向直接对应 Akita 和 RepoWise 的 benchmark gap：source files 和 query/index 层需要分离。它会让 Project Agent Terminal 的状态治理更像一个可审计系统，而不是一组漂亮的 JSON 文件。
+这个方向直接对应 Graphiti 和 RepoWise 的 benchmark gap：Project Agent Terminal 现在已经知道“状态来自哪里”，下一步要知道“这个状态在什么时间范围内仍然成立”。这会把 handoff 从 evidence-backed 进一步推进到 time-aware。
