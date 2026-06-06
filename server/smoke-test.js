@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { WebSocket } from "ws";
 
-const port = Number(process.env.PORT || 4147);
+const port = Number(process.env.PORT || (4200 + Math.floor(Math.random() * 1000)));
 const base = `http://127.0.0.1:${port}`;
 const ownsProjectDir = !process.env.PROJECT_DIR;
 const projectDir = process.env.PROJECT_DIR || mkdtempSync(path.join(os.tmpdir(), "project-agent-terminal-smoke-"));

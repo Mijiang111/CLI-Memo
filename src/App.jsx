@@ -103,6 +103,38 @@ async function api(path, options = {}) {
   return res.json();
 }
 
+function sanitizeTerminalInputData(data) {
+  return String(data || "")
+    .replace(/\x1b\[200~/g, "")
+    .replace(/\x1b\[201~/g, "")
+    .replace(/\[200~/g, "")
+    .replace(/\[201~/g, "");
+}
+
+function wsEndpoint(path) {
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const isLocalVite =
+    (window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost") &&
+    window.location.port === "5174";
+  const host = isLocalVite ? `${window.location.hostname}:4147` : window.location.host;
+  return `${protocol}://${host}${path}`;
+}
+
+function humanStatusLabel(status, fallback = "ready") {
+  if (status === "ready_with_warnings") return "Ready with checks";
+  if (status === "ready") return "Ready";
+  if (status === "blocked") return "Needs attention";
+  if (status === "watch" || status === "warn") return "Watch";
+  return cleanLabel(status || fallback);
+}
+
+function humanRiskLabel(risk, fallback = "No blocker") {
+  if (!risk) return fallback;
+  if (risk.tone === "bad") return "Blocked";
+  if (risk.id === "bundle_warnings") return "Bundle warnings";
+  return "Review before edit";
+}
+
 function statusTone(status) {
   if (["complete", "done", "passed"].includes(status)) return "ok";
   if (["blocked", "failed"].includes(status)) return "bad";
@@ -342,6 +374,7 @@ function TerminalPane({ TerminalClass, FitAddonClass, config, onCommandCaptured,
     const term = new TerminalClass({
       cursorBlink: true,
       convertEol: true,
+      ignoreBracketedPasteMode: true,
       fontFamily: '"SFMono-Regular", "Roboto Mono", "Menlo", monospace',
       fontSize: 13,
       lineHeight: 1.35,
@@ -384,8 +417,7 @@ function TerminalPane({ TerminalClass, FitAddonClass, config, onCommandCaptured,
       fitRef.current = fit;
       safeFit();
 
-      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-      socket = new WebSocket(`${protocol}://${window.location.host}/terminal`);
+      socket = new WebSocket(wsEndpoint("/terminal"));
       socketRef.current = socket;
       socket.addEventListener("open", () => {
         if (disposed) return;
@@ -438,7 +470,12 @@ function TerminalPane({ TerminalClass, FitAddonClass, config, onCommandCaptured,
         }
       });
       socket.addEventListener("close", () => setConnected(false));
-      dataDisposable = term.onData((data) => socket?.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ type: "input", data })));
+      dataDisposable = term.onData((data) => {
+        const cleanData = sanitizeTerminalInputData(data);
+        if (cleanData && socket?.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "input", data: cleanData }));
+        }
+      });
       window.addEventListener("resize", resize);
       resizeTimer = window.setTimeout(resize, 120);
       settleTimer = window.setTimeout(resize, 420);
@@ -1035,6 +1072,74 @@ function TakeoverSummaryPanel({ summary }) {
           ))}
         </div>
       </DetailDisclosure>
+    </section>
+  );
+}
+
+function HumanHandoffBrief({
+  activeGoal,
+  current,
+  nextCommand,
+  changedFiles = [],
+  impactFolders = [],
+  primaryRisk,
+  takeoverStatus,
+  acceptanceReady,
+  handoffLifecycle,
+  freshnessGate,
+  disclosureGate,
+  sourceFiles = []
+}) {
+  const canTakeOver = takeoverStatus?.canTakeOver ?? acceptanceReady;
+  const readinessTone = canTakeOver ? (primaryRisk ? "warn" : "ok") : "bad";
+  const readinessLabel = canTakeOver ? (primaryRisk ? "Ready with checks" : "Ready") : "Needs attention";
+  const currentTitle = current?.title || "No live cursor";
+  const currentDetail = eventDetail(current) || "No current operation is recorded yet.";
+  const changeItems = changedFiles.length
+    ? changedFiles.map((file) => file.path || file)
+    : impactFolders.map((item) => item.folder || item.path || item).filter(Boolean);
+  const riskText = primaryRisk?.summary || handoffLifecycle?.nextAction || "No blocking risk is visible in the handoff brief.";
+  const gateStatus = freshnessGate?.status || disclosureGate?.status || "not checked";
+  const packetRefs = sourceFiles.length || changeItems.length;
+
+  return (
+    <section className="human-handoff-brief" data-human-brief="handoff">
+      <div className="brief-hero">
+        <div>
+          <span>Current objective</span>
+          <strong>{activeGoal?.objective || "No active goal selected"}</strong>
+        </div>
+        <Pill tone={readinessTone}>{readinessLabel}</Pill>
+      </div>
+      <div className="brief-grid">
+        <div className="brief-cell">
+          <span>Where we are</span>
+          <strong>{currentTitle}</strong>
+          <p>{shortText(currentDetail, 140)}</p>
+        </div>
+        <div className="brief-cell">
+          <span>Next move</span>
+          <strong>{nextCommand ? "Command available" : "Choose next action"}</strong>
+          <code>{nextCommand || "Open the takeover summary, then select a task."}</code>
+        </div>
+        <div className={`brief-cell ${primaryRisk ? "warn" : "ok"}`}>
+          <span>Risk</span>
+          <strong>{humanRiskLabel(primaryRisk, humanStatusLabel(gateStatus, "Not checked"))}</strong>
+          <p>{shortText(riskText, 140)}</p>
+        </div>
+        <div className="brief-cell">
+          <span>Changed context</span>
+          <strong>{changeItems.length ? `${changeItems.length} recent item${changeItems.length === 1 ? "" : "s"}` : "No tracked changes"}</strong>
+          <p>{packetRefs ? `${sourceFiles.length} source refs, ${changeItems.length} changed paths.` : "The visible packet has no extra source refs yet."}</p>
+        </div>
+      </div>
+      {changeItems.length ? (
+        <div className="brief-paths">
+          {changeItems.slice(0, 5).map((item, index) => (
+            <span key={`${item}-${index}`} title={item}>{item}</span>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -3260,14 +3365,14 @@ function RunContextSidecar({
         />
         <SidecarLine
           title="Risk"
-          value={primaryRisk ? primaryRisk.id : changedSummary}
+          value={humanRiskLabel(primaryRisk, changedSummary)}
           meta={primaryRisk?.summary || (impactFolders[0]?.folder ? `Focus ${impactFolders[0].folder === "." ? "repo root" : impactFolders[0].folder}` : changedFiles[0]?.path || "No blocker")}
           tone={primaryRisk?.tone === "ok" ? "ok" : primaryRisk ? "warn" : changedFiles.length || impactFolders.length ? "warn" : "ok"}
           onClick={openHandoff}
         />
         <SidecarLine
           title="Resume"
-          value={takeoverStatus?.status || (acceptanceReady ? "ready" : "watch")}
+          value={humanStatusLabel(takeoverStatus?.status || (acceptanceReady ? "ready" : "watch"))}
           meta={takeoverStatus?.summary || handoffLifecycle?.nextAction || takeoverAcceptanceAudit?.score || continuity?.continuityAudit?.score || "Run handoff check"}
           tone={(takeoverStatus?.canTakeOver ?? acceptanceReady) ? "ok" : "warn"}
           onClick={openHandoff}
@@ -3323,24 +3428,40 @@ function RunContextSidecar({
       <details className="sidecar-drawer" open={openDrawer === "handoff"} onToggle={toggleDrawer("handoff")}>
         <summary>Handoff packet</summary>
         <div className="sidecar-map">
-          <TakeoverSummaryPanel summary={takeoverSummary} />
-          <HandoffPrimerPanel continuity={continuity} contract={continuityContract} acceptanceAudit={takeoverAcceptanceAudit} />
-          <HandoffLifecyclePanel lifecycle={handoffLifecycle} />
-          <AttentionPackPanel pack={attentionPack} />
-          <StateBoundaryPanel boundary={stateBoundary} />
-          <ProvenanceLedgerPanel ledger={provenanceLedger} />
-          <DecisionLedgerPanel ledger={decisionLedger} />
-          <TemporalProvenancePanel audit={temporalProvenance} />
-          <CodeGraphPanel graph={codeGraph} />
-          <FreshnessGatePanel gate={freshnessGate} />
-          <PhaseLedgerPanel ledger={phaseLedger} />
-          <CheckpointLedgerPanel ledger={checkpointLedger} />
-          <RuntimeEvalPanel runtimeEval={runtimeEval} />
-          <HookIngressPanel audit={hookIngressAudit} />
-          <PreEditRiskPanel risk={preEditRisk} />
-          <DisclosureGatePanel gate={disclosureGate} />
-          <TakeoverAcceptancePanel audit={takeoverAcceptanceAudit} />
-          <ContinuityPanel continuity={continuity} />
+          <HumanHandoffBrief
+            activeGoal={state.activeGoal}
+            current={current}
+            nextCommand={nextCommand}
+            changedFiles={changedFiles}
+            impactFolders={impactFolders}
+            primaryRisk={primaryRisk}
+            takeoverStatus={takeoverStatus}
+            acceptanceReady={acceptanceReady}
+            handoffLifecycle={handoffLifecycle}
+            freshnessGate={freshnessGate}
+            disclosureGate={disclosureGate}
+            sourceFiles={sourceFiles}
+          />
+          <DetailDisclosure title="Agent-readable packet" meta="advanced">
+            <TakeoverSummaryPanel summary={takeoverSummary} />
+            <HandoffPrimerPanel continuity={continuity} contract={continuityContract} acceptanceAudit={takeoverAcceptanceAudit} />
+            <HandoffLifecyclePanel lifecycle={handoffLifecycle} />
+            <AttentionPackPanel pack={attentionPack} />
+            <StateBoundaryPanel boundary={stateBoundary} />
+            <ProvenanceLedgerPanel ledger={provenanceLedger} />
+            <DecisionLedgerPanel ledger={decisionLedger} />
+            <TemporalProvenancePanel audit={temporalProvenance} />
+            <CodeGraphPanel graph={codeGraph} />
+            <FreshnessGatePanel gate={freshnessGate} />
+            <PhaseLedgerPanel ledger={phaseLedger} />
+            <CheckpointLedgerPanel ledger={checkpointLedger} />
+            <RuntimeEvalPanel runtimeEval={runtimeEval} />
+            <HookIngressPanel audit={hookIngressAudit} />
+            <PreEditRiskPanel risk={preEditRisk} />
+            <DisclosureGatePanel gate={disclosureGate} />
+            <TakeoverAcceptancePanel audit={takeoverAcceptanceAudit} />
+            <ContinuityPanel continuity={continuity} />
+          </DetailDisclosure>
         </div>
       </details>
 
@@ -3694,8 +3815,9 @@ export default function App({ TerminalClass, FitAddonClass }) {
     const [cfg, nextState] = await Promise.all([api("/config"), api("/state")]);
     setConfig(cfg);
     setState(nextState);
-    const selected = activeGoalId || nextState.activeGoal?.id || "";
-    if (!activeGoalId && selected) setActiveGoalId(selected);
+    const goalIds = new Set((nextState.goals || []).map((goal) => goal.id));
+    const selected = activeGoalId && goalIds.has(activeGoalId) ? activeGoalId : nextState.activeGoal?.id || "";
+    if (selected !== activeGoalId) setActiveGoalId(selected);
     return { cfg, nextState, selected };
   }, [activeGoalId]);
 
@@ -3754,8 +3876,7 @@ export default function App({ TerminalClass, FitAddonClass }) {
   }, [refreshInsights]);
 
   useEffect(() => {
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${protocol}://${window.location.host}/events`);
+    const socket = new WebSocket(wsEndpoint("/events"));
     let debounce = null;
     socket.onmessage = (event) => {
       let message = null;

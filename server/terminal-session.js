@@ -9,10 +9,36 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pythonPtyBridge = path.join(__dirname, "python-pty-bridge.py");
 
 function cleanCommand(command) {
-  return command
+  return stripResidualTrackingTokens(stripTrackingControlSequences(command))
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
     .replace(/[^\x20-\x7e]/g, "")
     .trim();
+}
+
+function stripBracketedPasteMarkers(data) {
+  return String(data || "")
+    .replace(/\x1b\[200~/g, "")
+    .replace(/\x1b\[201~/g, "")
+    .replace(/\[200~/g, "")
+    .replace(/\[201~/g, "");
+}
+
+function stripTrackingControlSequences(data) {
+  return stripBracketedPasteMarkers(data)
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\|\\)/g, "")
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1bO[ -~]/g, "")
+    .replace(/\x1b[()][A-Za-z0-9]/g, "")
+    .replace(/\x1b[=>]/g, "");
+}
+
+function stripResidualTrackingTokens(command) {
+  return String(command || "")
+    .replace(/\[20[01]~/g, "")
+    .replace(/\[(?:I|O)/g, "")
+    .replace(/\[\d+;\d+R/g, "")
+    .replace(/\[\?[\d;]*c/g, "")
+    .replace(/\]\d+;[^\s\\]*(?:\\)?/g, "");
 }
 
 function firstExisting(candidates) {
@@ -231,23 +257,25 @@ export class TerminalSession {
 
   write(data) {
     if (!this.pty) this.start();
+    const writableData = stripBracketedPasteMarkers(data);
     this.trackInput(data);
+    if (!writableData) return;
     if (this.pty) {
-      this.pty.write(data);
+      this.pty.write(writableData);
       return;
     }
     if (!this.pipe || !this.pipe.stdin.writable) return;
     if (this.pipeMode === "python-pty") {
-      this.pipe.stdin.write(data);
+      this.pipe.stdin.write(writableData);
       return;
     }
-    if (data.includes("\x03")) {
-      this.echoPipeInput(data);
+    if (writableData.includes("\x03")) {
+      this.echoPipeInput(writableData);
       this.pipe.kill("SIGINT");
       return;
     }
-    this.echoPipeInput(data);
-    this.pipe.stdin.write(data.replace(/\r/g, "\n"));
+    this.echoPipeInput(writableData);
+    this.pipe.stdin.write(writableData.replace(/\r/g, "\n"));
   }
 
   resize(cols, rows) {
@@ -269,7 +297,11 @@ export class TerminalSession {
   }
 
   trackInput(data) {
-    for (const char of data) {
+    for (const char of stripTrackingControlSequences(data)) {
+      if (char === "\x03" || char === "\x15") {
+        this.inputBuffer = "";
+        continue;
+      }
       if (char === "\r") {
         const command = cleanCommand(this.inputBuffer);
         this.inputBuffer = "";
@@ -285,7 +317,8 @@ export class TerminalSession {
           title: "Command started",
           status: "current",
           detail: command,
-          refs: ["terminal-session"]
+          refs: ["terminal-session"],
+          source: "terminal-session"
         });
         this.broadcast({ type: "command-start", command: this.currentCommand });
         return;
@@ -317,7 +350,8 @@ export class TerminalSession {
         title: "Command completed",
         status: "done",
         detail: captured.command,
-        refs: ["terminal-session"]
+        refs: ["terminal-session"],
+        source: "terminal-session"
       });
       this.broadcast({ type: "command-captured", command: captured });
       return captured;

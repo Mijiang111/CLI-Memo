@@ -1,8 +1,18 @@
 # Project Agent Terminal 产品开发日志
 
-日期：2026-06-05  
-最新本地提交：`feat: add summary-first takeover and cli terminal bridge`（以 `git log` 为准）  
-当前状态：Summary-first takeover、grep-first retrieval、CLI Agent terminal bridge、lean continuity manifest 已实现并验证；远端 `origin` 尚未配置，暂不能 push 到 GitHub。
+日期：2026-06-06  
+最新本地提交：以 `git log -1 --oneline` 为准。  
+当前状态：Summary-first takeover、grep-first retrieval、CLI Agent terminal bridge、lean continuity manifest、人类可读 handoff brief、terminal bracketed paste 清洗、直连后端 websocket 已实现并验证；远端 `origin` 指向 `Mijiang111/CLI-Memo.git`。
+
+更新：右侧 Handoff 从“AI 可读大包”调整为“人先读 brief，AI 再展开 packet”。默认层只展示 Current objective、Where we are、Next move、Risk、Changed context；takeover summary、audit、provenance、temporal、boundary、runtime eval 等细节收进 `Agent-readable packet` 折叠区。目标是让新用户先理解产品在做什么，而不是被内部治理字段淹没。
+
+更新：terminal 输入链路增加 bracketed paste 清洗。前端 xterm 启用 `ignoreBracketedPasteMode` 并在 `onData` 清理 `\x1b[200~` / `\x1b[201~` 与字面 `[200~` / `[201~`；后端写入 PTY、命令追踪、last-command evidence 也会二次清洗，避免命令记录和证据里出现浏览器粘贴控制序列。
+
+更新：开发服务稳定性继续收敛。Vite 本地页面的 `/terminal` 和 `/events` websocket 改为直连后端 `4147`，绕开 Vite ws proxy 的 EPIPE 体感问题；`npm test` 默认端口改成随机高位端口，避免开发服务正在运行时 smoke test 误打真实 demo 并写入 `Smoke test / stale agent` 状态。
+
+更新：stale goal 恢复路径补齐。浏览器如果还缓存旧 goal id，前端会在读取新 state 后自动切回当前 active goal；后端 `/api/kernel` 和 `/api/insights` 收到不存在的 goal 参数时也会降级到当前 active goal，避免 demo reset 后因为旧 URL/query 把服务打崩。
+
+更新：demo 基线已清理。删除临时 live-watch / snapshot / agent-run demo 文档，`PROJECT.md`、roadmap、architecture principles 只保留 CLI Memo 当前核心叙事：summary-first 接手、grep-first retrieval、terminal 内启动 CLI agent、人类可读控制台。
 
 更新：基于 agentmemory、RAVBYTE、ai-memory、Graphiti、Repomix/Gitingest 等参考项目的共同模式，`continuity.json` 已从 full-state dump 改成 lean manifest。默认文件只保留 summary、budget、hash、source refs 和 on-demand reads；rich audit/detail 移到 `.project-agent/continuity-detail.json`，由 bundle 构建和 API 在需要时 hydrate。
 
@@ -197,28 +207,24 @@ Benchmark 结论已经沉淀在 `docs/research/agent-governance-landscape.md`。
 
 `/Users/michael/Documents/Codex/2026-06-01/rohitg00-agentmemory-https-github-com-rohitg00/outputs/project-agent-terminal`
 
-已完成本地提交链：
+已完成本地提交链以 `git log --oneline` 为准。当前主线包含：
 
 ```text
-current HEAD feat: add summary-first takeover and cli terminal bridge
-f57f460 fix: restore sidecar code graph binding
-913e785 feat: add temporal provenance audit
-caf860a docs: update product development log
-8432ebc feat: add git freshness audit
-2612546 feat: add state boundary audit
-8dc80a6 docs: add product development log
-69044ef chore: snapshot project agent terminal
+feat: add lean continuity manifest
+feat: add summary-first takeover and cli terminal bridge
+fix: restore sidecar code graph binding
+feat: add temporal provenance audit
+docs: update product development log
 ```
 
 推送状态：
 
-- 当前 `git remote -v` 为空。
-- 失败原因：当前 repo 没有配置 `origin` remote，不能把本地提交 push 到 GitHub。
-- 需要补充远端，例如：
+- 当前 `origin` 指向 `https://github.com/Mijiang111/CLI-Memo.git`。
+- 本轮提交完成后可直接 `git push origin main`。
+- 如果要换成 PR 工作流，可从 `main` 切出 `codex/<description>` 后再推送。
 
 ```bash
-git remote add origin <github-repo-url>
-git push -u origin main
+git push origin main
 ```
 
 ## 六、产品判断

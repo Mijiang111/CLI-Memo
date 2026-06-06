@@ -595,7 +595,10 @@ function sameRuntimeOperation(current, later) {
   const sharedSource = current.source && later.source && current.source === later.source;
   const sharedTool = current.tool && later.tool && current.tool === later.tool;
   const sharedAgent = current.agentId && later.agentId && current.agentId === later.agentId;
+  const sharedDetail = current.detail && later.detail && current.detail === later.detail;
+  const sharedTerminalRef = (current.refs || []).includes("terminal-session") && (later.refs || []).includes("terminal-session");
   const titleContinues = later.title && current.title && later.title.startsWith(current.title);
+  if ((sharedSource || sharedTerminalRef) && sharedDetail) return true;
   return Boolean((sharedSource && sharedTool && (sharedAgent || titleContinues)) || (sharedSource && sharedAgent && titleContinues));
 }
 
@@ -3014,6 +3017,15 @@ function buildArchitectureTrace(architecture = {}, changedFiles = []) {
   const deleted = changes.filter((file) => file.status === "deleted");
   const modified = changes.filter((file) => file.status === "modified");
   const added = changes.filter((file) => file.status === "added");
+  const stableEntryFiles = changes.length
+    ? []
+    : (architecture?.files || [])
+        .filter((file) => ["kernel", "docs", "code", "config"].includes(file.kind))
+        .sort((a, b) => {
+          const weight = (file) => (file.kind === "kernel" ? 0 : file.path.startsWith("docs/product/") ? 1 : file.path.startsWith("docs/architecture/") ? 2 : file.kind === "config" ? 3 : 4);
+          return weight(a) - weight(b) || a.path.localeCompare(b.path);
+        })
+        .slice(0, 8);
   const inspectOrder = [
     ...topFolders.slice(0, 4).map((folder) => ({
       type: "folder",
@@ -3030,9 +3042,18 @@ function buildArchitectureTrace(architecture = {}, changedFiles = []) {
       latestFile: file.path,
       status: file.status,
       refs: [file.path, file.hash || file.previousHash].filter(Boolean)
+    })),
+    ...stableEntryFiles.map((file) => ({
+      type: "file",
+      path: file.path,
+      reason: `${file.kind || "file"} entry point for stable project context`,
+      latestFile: file.path,
+      status: "stable",
+      refs: [file.path, file.hash].filter(Boolean)
     }))
   ];
   const codeGraph = buildCodeGraphTrace(architecture?.codeGraph, changes);
+  const firstInspect = inspectOrder.find(Boolean);
   return {
     status: totals.files ? (changes.length ? "changed" : "stable") : "missing",
     scannedAt: architecture?.scannedAt || null,
@@ -3080,6 +3101,8 @@ function buildArchitectureTrace(architecture = {}, changedFiles = []) {
       ? `Inspect ${topFolders[0].folder === "." ? "repo root" : topFolders[0].folder} and ${topFolders[0].latestFile || "recent files"} before editing.`
       : changes.length
         ? `Inspect ${changes[0].path} before editing.`
+        : firstInspect
+          ? `Inspect ${firstInspect.path} before editing stable project context.`
         : "Run architecture scan before editing."
   };
 }

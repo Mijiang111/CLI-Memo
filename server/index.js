@@ -131,6 +131,12 @@ function currentSummary() {
   return summarizeState(readState(projectDir));
 }
 
+function resolveReadableGoalId(summary, requestedGoalId) {
+  const goals = new Set((summary.goals || []).map((goal) => goal.id));
+  if (requestedGoalId && goals.has(requestedGoalId)) return requestedGoalId;
+  return summary.activeGoal?.id || "";
+}
+
 app.get("/api/config", (req, res) => {
   res.json({
     projectDir,
@@ -487,7 +493,7 @@ app.get(
     let packet = null;
     if (summary.initialized) {
       const role = req.query.role || "coding_agent";
-      const goal = req.query.goal || summary.activeGoal?.id;
+      const goal = resolveReadableGoalId(summary, req.query.goal);
       const args = ["kernel", "--role", role, "--format", "json"];
       if (goal) args.push("--goal", goal);
       packet = await runJson(projectDir, args);
@@ -548,8 +554,9 @@ app.post(
 app.get(
   "/api/kernel",
   asyncHandler(async (req, res) => {
+    const summary = currentSummary();
     const role = req.query.role || "coding_agent";
-    const goal = req.query.goal;
+    const goal = resolveReadableGoalId(summary, req.query.goal);
     const args = ["kernel", "--role", role, "--format", "json"];
     if (goal) args.push("--goal", goal);
     const packet = await runJson(projectDir, args);
@@ -704,7 +711,13 @@ app.post(
       return;
     }
     const verifies = req.body.verifies?.length ? req.body.verifies : [];
-    const cleanOutput = (snapshot.output || "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").trim();
+    const cleanOutput = (snapshot.output || "")
+      .replace(/\x1b\[200~/g, "")
+      .replace(/\x1b\[201~/g, "")
+      .replace(/\[200~/g, "")
+      .replace(/\[201~/g, "")
+      .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+      .trim();
     const summary =
       req.body.summary ||
       `${snapshot.command} produced ${cleanOutput.split("\n").filter(Boolean).length || 1} line(s) of terminal output`;
