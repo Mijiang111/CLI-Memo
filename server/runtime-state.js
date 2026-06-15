@@ -85,7 +85,7 @@ const CONTINUITY_MANIFEST_BYTE_BUDGET = 60000;
 const SECTION_BUDGETS = {
   memory: { maxTokens: 1800, maxBytes: 18000, sourceRef: ".project-agent/memory-graph.json", jq: "{nodeCount,edgeCount,provenanceCoverage,nodes:.nodes[0:12],edges:.edges[0:16],provenanceRefs:.provenanceRefs[0:12]}" },
   process: { maxTokens: 1800, maxBytes: 18000, sourceRef: ".project-agent/process-trace.json", jq: "{current,previous,next,phases:.phases[0:8],recentEvents:.events[0:8],inspectOrder:.inspectOrder[0:12]}" },
-  architecture: { maxTokens: 2200, maxBytes: 24000, sourceRef: ".project-agent/architecture-map.json", jq: "{totals,impact,recentChanges:.recentChanges[0:12],inspectOrder:.inspectOrder[0:16],codeGraph:{status,nodeCount,edgeCount,hotspots:.hotspots[0:8],changedImpact:.changedImpact[0:8]}}" },
+  architecture: { maxTokens: 2200, maxBytes: 24000, sourceRef: ".project-agent/architecture-map.json", jq: "{totals,impact,recentChanges:.recentChanges[0:12],inspectOrder:.inspectOrder[0:16],codeGraph:{status,nodeCount,edgeCount,symbolCount,symbolEdgeCount,hotspots:.hotspots[0:8],symbolGraph:{status,symbolCount,usageEdgeCount,hotspots:.hotspots[0:6]},changedImpact:.changedImpact[0:8]}}" },
   handoff: { maxTokens: 1600, maxBytes: 16000, sourceRef: ".project-agent/takeover-packet.json", jq: "{status,canResume,objective,cursor,nextCommand,firstActions:.firstActions[0:5],firstRead:.firstRead[0:8],guardrails:.guardrails[0:8]}" }
 };
 const DISCLOSURE_IGNORED_KEYS = new Set([
@@ -1315,14 +1315,36 @@ function codeGraphSummary(graph = {}, budget = null) {
     localEdgeCount: graph.localEdgeCount || 0,
     packageEdgeCount: graph.packageEdgeCount || 0,
     unresolvedEdgeCount: graph.unresolvedEdgeCount || 0,
+    symbolCount: graph.symbolCount || graph.symbolGraph?.symbolCount || 0,
+    symbolEdgeCount: graph.symbolEdgeCount || graph.symbolGraph?.usageEdgeCount || 0,
     summary: graph.summary || null,
     hotspots: (graph.hotspots || []).slice(0, 8),
+    symbolGraph: graph.symbolGraph
+      ? {
+          schemaVersion: graph.symbolGraph.schemaVersion,
+          status: graph.symbolGraph.status,
+          symbolCount: graph.symbolGraph.symbolCount || 0,
+          exportedCount: graph.symbolGraph.exportedCount || 0,
+          usageEdgeCount: graph.symbolGraph.usageEdgeCount || 0,
+          calledEdgeCount: graph.symbolGraph.calledEdgeCount || 0,
+          hotspots: (graph.symbolGraph.hotspots || []).slice(0, 6),
+          changedImpact: (graph.symbolGraph.changedImpact || []).slice(0, 6),
+          summary: graph.symbolGraph.summary || null,
+          sourceRef: ".project-agent/architecture-map.json#codeGraph.symbolGraph"
+        }
+      : null,
     changedImpact: (graph.changedImpact || []).slice(0, 8).map((item) => ({
       path: item.path,
       dependents: (item.dependents || []).slice(0, 6),
       dependencies: (item.dependencies || []).slice(0, 6),
+      symbols: (item.symbols || []).slice(0, 6),
+      symbolDependents: (item.symbolDependents || []).slice(0, 6),
+      tests: (item.tests || []).slice(0, 6),
+      recommendedReads: (item.recommendedReads || []).slice(0, 8),
+      testStatus: item.testStatus || null,
       nextAction: item.nextAction
     })),
+    coChangeRecommendations: (graph.coChangeRecommendations || []).slice(0, 8),
     warnings: (graph.warnings || []).slice(0, 8),
     sourceRef: ".project-agent/architecture-map.json#codeGraph",
     budget
@@ -1569,7 +1591,7 @@ function buildContinuitySourceRefs(projectDir) {
     stateFileRecord(projectDir, MEMORY_GRAPH_FILE, "durable memory graph source", "{nodeCount,edgeCount,provenanceCoverage,nodes:.nodes[0:12],edges:.edges[0:16]}"),
     stateFileRecord(projectDir, PROCESS_TRACE_FILE, "durable process cursor source", "{current,previous,next,inspectOrder,events:.events[0:8]}"),
     stateFileRecord(projectDir, DEVELOPMENT_TRAIL_FILE, "process-to-file trail and edit risk source", "{status,summary,current,steps:.steps[0:8],inspectOrder}"),
-    stateFileRecord(projectDir, ARCHITECTURE_MAP_FILE, "architecture and code graph source", "{totals,impact,recentChanges:.recentChanges[0:12],codeGraph:{status,nodeCount,edgeCount,changedImpact:.changedImpact[0:8]}}"),
+    stateFileRecord(projectDir, ARCHITECTURE_MAP_FILE, "architecture and code graph source", "{totals,impact,recentChanges:.recentChanges[0:12],codeGraph:{status,nodeCount,edgeCount,symbolCount,symbolGraph:{status,symbolCount,usageEdgeCount},changedImpact:.changedImpact[0:8]}}"),
     stateFileRecord(projectDir, TAKEOVER_PACKET_FILE, "first actions, guardrails, and next command", "{status,canResume,cursor,nextCommand,firstActions,firstRead,guardrails}"),
     stateFileRecord(projectDir, CONTINUITY_AUDIT_FILE, "handoff artifact readiness audit", "{status,canResume,score,checks,blockers,warnings}"),
     stateFileRecord(projectDir, TAKEOVER_ACCEPTANCE_AUDIT_FILE, "user-objective takeover acceptance audit", "{status,canResume,score,rows,blockers,warnings}"),

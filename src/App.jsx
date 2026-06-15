@@ -12,9 +12,11 @@ import {
   Code2,
   Command,
   Database,
+  Download,
   Eye,
   FileCheck2,
   FileText,
+  FolderOpen,
   GitBranch,
   Goal,
   History,
@@ -23,14 +25,18 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Search,
   ShieldCheck,
   Sparkles,
   TerminalSquare,
+  Upload,
   XCircle
 } from "lucide-react";
 
 const API = "/api";
+const API_PORT = import.meta.env?.VITE_API_PORT || "4147";
 const roles = ["coding_agent", "qa_agent", "architect", "product_strategist", "project_governor"];
+const mapViewIds = ["kernel", "process", "memory", "graph", "architecture", "product"];
 const adoptedArchitecturePatterns = [
   {
     id: "tiered-disclosure",
@@ -90,15 +96,47 @@ const adoptedArchitecturePatterns = [
   }
 ];
 
+function storedAuthToken() {
+  try {
+    return window.localStorage.getItem("project-agent-auth-token") || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveAuthToken(token) {
+  try {
+    const clean = String(token || "").trim();
+    if (clean) window.localStorage.setItem("project-agent-auth-token", clean);
+    else window.localStorage.removeItem("project-agent-auth-token");
+  } catch {}
+}
+
+function isAuthErrorMessage(message) {
+  return String(message || "").toLowerCase().includes("authentication required");
+}
+
 async function api(path, options = {}) {
+  const token = storedAuthToken();
   const res = await fetch(`${API}${path}`, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.headers || {})
+    },
     ...options,
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || `Request failed: ${res.status}`);
+    let payload = null;
+    try {
+      payload = JSON.parse(text);
+    } catch {}
+    const error = new Error(payload?.error || text || `Request failed: ${res.status}`);
+    error.status = res.status;
+    error.payload = payload;
+    throw error;
   }
   return res.json();
 }
@@ -115,9 +153,11 @@ function wsEndpoint(path) {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const isLocalVite =
     (window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost") &&
-    window.location.port === "5174";
-  const host = isLocalVite ? `${window.location.hostname}:4147` : window.location.host;
-  return `${protocol}://${host}${path}`;
+    API_PORT;
+  const host = isLocalVite ? `${window.location.hostname}:${API_PORT}` : window.location.host;
+  const token = storedAuthToken();
+  const tokenQuery = token ? `${path.includes("?") ? "&" : "?"}authToken=${encodeURIComponent(token)}` : "";
+  return `${protocol}://${host}${path}${tokenQuery}`;
 }
 
 function humanStatusLabel(status, fallback = "ready") {
@@ -287,9 +327,9 @@ function StateSourceStrip({ title = "Source of Truth", items = [] }) {
   );
 }
 
-function IconButton({ icon: Icon, children, onClick, disabled, tone = "neutral", title }) {
+function IconButton({ icon: Icon, children, onClick, disabled, tone = "neutral", title, dataAction }) {
   return (
-    <button className={`icon-button ${tone}`} onClick={onClick} disabled={disabled} title={title || children}>
+    <button className={`icon-button ${tone}`} onClick={onClick} disabled={disabled} title={title || children} data-state-transfer-action={dataAction || undefined}>
       {Icon ? <Icon size={16} /> : null}
       <span>{children}</span>
     </button>
@@ -307,7 +347,49 @@ function Empty({ title, body }) {
 }
 
 function cleanLabel(value, fallback = "Unknown") {
-  return String(value || fallback).replace(/[_-]+/g, " ");
+  return String(value || fallback).replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ");
+}
+
+function initialMapViewFromLocation() {
+  try {
+    const view = new URLSearchParams(window.location.search).get("map");
+    return mapViewIds.includes(view) ? view : null;
+  } catch {
+    return null;
+  }
+}
+
+function initialMemoryFiltersFromLocation() {
+  const filters = {
+    query: "",
+    type: "",
+    folder: "",
+    fileType: "",
+    concept: "",
+    sourceQuality: "",
+    useIndex: ""
+  };
+  try {
+    const params = new URLSearchParams(window.location.search);
+    filters.query = params.get("memoryQuery") || "";
+    filters.type = params.get("memoryType") || "";
+    filters.folder = params.get("memoryFolder") || "";
+    filters.fileType = params.get("memoryFileType") || "";
+    filters.concept = params.get("memoryConcept") || "";
+    filters.sourceQuality = params.get("memorySourceQuality") || "";
+    filters.useIndex = params.get("memoryUseIndex") || "";
+  } catch {}
+  return filters;
+}
+
+function memorySearchPathFromLocation() {
+  const filters = initialMemoryFiltersFromLocation();
+  const query = new URLSearchParams({ limit: "5" });
+  Object.entries(filters).forEach(([key, value]) => {
+    const clean = String(value || "").trim();
+    if (clean) query.set(key, clean);
+  });
+  return `/memory/search?${query.toString()}`;
 }
 
 function shortText(value, max = 96) {
@@ -339,6 +421,598 @@ function DetailDisclosure({ title, meta, children, defaultOpen = false }) {
       </summary>
       <div className="detail-disclosure-body">{children}</div>
     </details>
+  );
+}
+
+function healthTone(status) {
+  if (status === "ok" || status === "online") return "ok";
+  if (status === "offline" || status === "bad") return "bad";
+  if (status === "watch" || status === "checking") return "warn";
+  return "muted";
+}
+
+function sandboxTone(status) {
+  if (status === "ok") return "ok";
+  if (status === "blocked" || status === "bad") return "bad";
+  if (status === "watch" || status === "warn") return "warn";
+  return "muted";
+}
+
+function HealthStrip({ health, connection, onRetry }) {
+  const online = connection?.status === "online";
+  const status = online ? health?.status || "online" : connection?.status || "checking";
+  const offline = status === "offline";
+  const projectName = health?.project?.name || "project";
+  const portLabel = health?.server?.port ? `:${health.server.port}` : "api";
+  const boundary = health?.security?.boundary || "local_only";
+  const retryAt = connection?.nextRetryAt ? new Date(connection.nextRetryAt).toLocaleTimeString() : "";
+  return (
+    <div className={`health-strip ${healthTone(status)}`} data-health-strip="phase6-local-health">
+      <span title={online ? health?.nextAction : connection?.lastError}>
+        <Activity size={13} />
+        {cleanLabel(status)}
+      </span>
+      <span title={health?.project?.projectDir || ""}>{projectName}</span>
+      <span title={health?.server?.url || ""}>{portLabel}</span>
+      <span title={health?.security?.summary || "Local-only boundary"}>{cleanLabel(boundary)}</span>
+      {offline && retryAt ? <span title={connection?.lastError}>retry {retryAt}</span> : null}
+      {offline ? (
+        <button type="button" onClick={onRetry}>
+          <RefreshCw size={12} />
+          Reconnect
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function AuthUnlockPanel({ onSaved }) {
+  const [token, setToken] = useState("");
+  const submit = (event) => {
+    event.preventDefault();
+    saveAuthToken(token);
+    setToken("");
+    onSaved?.();
+  };
+  return (
+    <form className="auth-unlock" data-auth-unlock="phase6-optional-auth" onSubmit={submit}>
+      <div>
+        <strong>Authentication required</strong>
+        <span>Enter the local Project Agent bearer token for this non-local session.</span>
+      </div>
+      <input
+        value={token}
+        onChange={(event) => setToken(event.target.value)}
+        type="password"
+        placeholder="PROJECT_AGENT_AUTH_TOKEN"
+        aria-label="Project Agent auth token"
+      />
+      <IconButton icon={Save} tone="primary" disabled={token.trim().length < 16}>
+        Unlock
+      </IconButton>
+    </form>
+  );
+}
+
+function AgentBootstrapPanel({ bootstrap }) {
+  const providers = bootstrap?.providers || [];
+  const protocol = bootstrap?.toolProtocol || [];
+  const firstCall = bootstrap?.firstCall || {};
+  const harness = bootstrap?.automaticHarness || {};
+  const security = bootstrap?.security || {};
+  const mcp = bootstrap?.mcp || {};
+  const snippetProvider = providers.find((provider) => provider.id === "claude") || providers[0];
+  const snippet = snippetProvider?.snippet ? String(snippetProvider.snippet).slice(0, 1600) : "";
+
+  return (
+    <section className="insight-section agent-bootstrap-section" data-agent-bootstrap="phase2-agent-bootstrap">
+      <div className="insight-heading">
+        <span>Agent Bootstrap</span>
+        <Pill tone={bootstrap?.status === "ready" ? "ok" : "warn"}>{bootstrap?.automation?.manualUserStepsRequired === false ? "harness ready" : cleanLabel(bootstrap?.status || "loading")}</Pill>
+      </div>
+      <div className="bootstrap-metrics">
+        <InsightCard icon={Bot} label="Providers" value={String(providers.length)} detail={providers.slice(0, 3).map((item) => item.label).join(" / ") || "none"} tone={providers.length ? "ok" : "warn"} />
+        <InsightCard icon={Command} label="First Tool" value={firstCall.tool || "project_takeover_summary"} detail={firstCall.mode || "automatic"} tone={firstCall.tool ? "ok" : "warn"} />
+        <InsightCard icon={Brain} label="Memory Harness" value={harness.tool ? "auto" : "missing"} detail={harness.tool || "project_memory_harness"} tone={harness.tool ? "ok" : "warn"} />
+        <InsightCard icon={ShieldCheck} label="Boundary" value={security.localOnly === false ? "remote" : "local"} detail={security.envValuesExposed ? "env exposed" : "env hidden"} tone={security.localOnly === false ? "bad" : "ok"} />
+      </div>
+      <div className="bootstrap-boundary">
+        <div>
+          <strong>{mcp.serverName || "cli-memo"} · {mcp.transport || "stdio"}</strong>
+          <span title={mcp.commandLine || ""}>{mcp.commandLine || "npm run mcp -- --project-dir <dir>"}</span>
+        </div>
+        <Pill tone={bootstrap?.automation?.manualJsonEditingRequired === false ? "ok" : "warn"}>{bootstrap?.automation?.manualJsonEditingRequired === false ? "no manual json" : "check setup"}</Pill>
+      </div>
+      <div className="bootstrap-provider-list">
+        {providers.slice(0, 5).map((provider) => (
+          <div className="bootstrap-provider" key={provider.id}>
+            <div>
+              <strong>{provider.label}</strong>
+              <span>{cleanLabel(provider.configType)} · {provider.serverName || mcp.serverName || "cli-memo"}</span>
+            </div>
+            <Pill tone={provider.consumes?.includes("automaticHarness") ? "ok" : "warn"}>{provider.consumes?.includes("automaticHarness") ? "harness" : "mcp"}</Pill>
+          </div>
+        ))}
+      </div>
+      <div className="bootstrap-protocol">
+        {protocol.slice(0, 5).map((step) => (
+          <div className="bootstrap-step" key={`${step.step}-${step.tool}`}>
+            <Pill tone={step.mode === "automatic" || step.mode === "automatic_for_work" ? "ok" : "warn"}>{step.step}</Pill>
+            <div>
+              <strong>{step.tool}</strong>
+              <span>{step.reason}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      {snippet ? (
+        <div className="bootstrap-snippet">
+          <div className="launch-plan-title">
+            <div>
+              <strong>{snippetProvider.label}</strong>
+              <span>{cleanLabel(snippetProvider.configType)} · {snippetProvider.serverName || mcp.serverName}</span>
+            </div>
+            <Pill tone="ok">{bootstrap?.schemaVersion || "bootstrap"}</Pill>
+          </div>
+          <code>{snippet}</code>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function StateTransferPanel({ inventory, health, onImported }) {
+  const [mode, setMode] = useState("portable");
+  const [exportBundle, setExportBundle] = useState(null);
+  const [importText, setImportText] = useState("");
+  const [importPlan, setImportPlan] = useState(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [transferError, setTransferError] = useState("");
+  const totals = inventory?.totals || {};
+  const exportTotals = exportBundle?.totals || {};
+  const importTotals = importPlan?.totals || {};
+
+  const parseImportBundle = () => {
+    try {
+      return JSON.parse(importText);
+    } catch {
+      throw new Error("Import bundle must be valid JSON.");
+    }
+  };
+
+  const downloadBundle = (bundle) => {
+    const blob = new Blob([`${JSON.stringify(bundle, null, 2)}\n`], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `project-agent-state-${bundle.mode || "portable"}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 250);
+  };
+
+  const runExport = async () => {
+    setTransferError("");
+    const bundle = await api(`/state/export?mode=${mode}`);
+    setExportBundle(bundle);
+    downloadBundle(bundle);
+  };
+
+  const stageCurrentExport = () => {
+    if (!exportBundle) return;
+    setImportText(JSON.stringify(exportBundle, null, 2));
+    setImportPlan(null);
+    setConfirmed(false);
+    setTransferError("");
+  };
+
+  const previewImport = async () => {
+    setTransferError("");
+    const bundle = parseImportBundle();
+    const plan = await api("/state/import", {
+      method: "POST",
+      body: {
+        bundle,
+        dryRun: true
+      }
+    });
+    setImportPlan(plan);
+    setConfirmed(false);
+  };
+
+  const executeImport = async () => {
+    setTransferError("");
+    const bundle = parseImportBundle();
+    const plan = await api("/state/import", {
+      method: "POST",
+      body: {
+        bundle,
+        dryRun: false,
+        overwrite: true
+      }
+    });
+    setImportPlan(plan);
+    setConfirmed(false);
+    await onImported?.();
+  };
+
+  const transfer = async (fn) => {
+    try {
+      await fn();
+    } catch (err) {
+      setTransferError(err.message || String(err));
+    }
+  };
+
+  return (
+    <section className="insight-section state-transfer-section" data-state-transfer="phase6-state-transfer">
+      <div className="insight-heading">
+        <span>State Transfer</span>
+        <Pill tone={health?.security?.localOnly ? "ok" : "warn"}>{health?.security?.boundary ? cleanLabel(health.security.boundary) : "local only"}</Pill>
+      </div>
+      <div className="transfer-metrics">
+        <InsightCard icon={FileCheck2} label="State Files" value={String(totals.files || exportTotals.files || 0)} detail={`${formatBytes(totals.bytes || exportTotals.bytes || 0)} tracked`} tone="ok" />
+        <InsightCard icon={Database} label="Source" value={String(totals.sourceFiles || exportTotals.classes?.source || 0)} detail={`${formatBytes(totals.sourceBytes || 0)} source`} tone="ok" />
+        <InsightCard icon={RefreshCw} label="Rebuildable" value={String((totals.derivedFiles || 0) + (totals.indexFiles || 0))} detail={`${formatBytes(totals.derivedBytes || 0)} derived`} tone="warn" />
+      </div>
+      <div className="transfer-toolbar">
+        <select className="select compact" value={mode} onChange={(event) => setMode(event.target.value)}>
+          <option value="portable">portable</option>
+          <option value="minimal">minimal</option>
+          <option value="full">full</option>
+        </select>
+        <IconButton icon={Download} onClick={() => transfer(runExport)} dataAction="export">
+          Export
+        </IconButton>
+        <IconButton icon={ClipboardList} onClick={stageCurrentExport} disabled={!exportBundle} dataAction="stage-export">
+          Stage Export
+        </IconButton>
+      </div>
+      {exportBundle ? (
+        <div className="transfer-result">
+          <strong>{exportBundle.mode} export</strong>
+          <span>{exportBundle.totals?.files || 0} file(s) · {formatBytes(exportBundle.totals?.bytes || 0)} · {(exportBundle.digest || "").slice(0, 12)}</span>
+        </div>
+      ) : null}
+      <textarea
+        className="transfer-input"
+        value={importText}
+        onChange={(event) => {
+          setImportText(event.target.value);
+          setImportPlan(null);
+          setConfirmed(false);
+        }}
+        rows={5}
+        placeholder="Paste project-agent.state-export.v1 JSON"
+      />
+      <div className="transfer-toolbar">
+        <IconButton icon={Eye} onClick={() => transfer(previewImport)} disabled={!importText.trim()} dataAction="preview-import">
+          Preview Import
+        </IconButton>
+        <label className="confirm-check">
+          <input type="checkbox" data-state-transfer-action="confirm-overwrite" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={!importPlan || importPlan.status === "blocked"} />
+          <span>Overwrite changed files</span>
+        </label>
+        <IconButton icon={Upload} tone="primary" onClick={() => transfer(executeImport)} disabled={!confirmed || !importPlan || importPlan.status === "blocked"} dataAction="execute-import">
+          Import
+        </IconButton>
+      </div>
+      {transferError ? <div className="transfer-error">{transferError}</div> : null}
+      {importPlan ? (
+        <div className={`transfer-plan ${importPlan.status}`}>
+          <div className="transfer-plan-title">
+            <strong>{cleanLabel(importPlan.status)}</strong>
+            <span>{importPlan.summary}</span>
+          </div>
+          <div className="audit-counts">
+            <span className="ok">create {importTotals.create || 0}</span>
+            <span className={importTotals.replace ? "warn" : "ok"}>replace {importTotals.replace || 0}</span>
+            <span>same {importTotals.identical || 0}</span>
+            <span className={importTotals.rejected ? "bad" : "ok"}>reject {importTotals.rejected || 0}</span>
+          </div>
+          <div className="transfer-action-list">
+            {(importPlan.actions || []).slice(0, 6).map((item) => (
+              <span key={item.path} className={item.action === "would_replace" || item.action === "replace" ? "warn" : item.action === "create" ? "ok" : "muted"} title={item.path}>
+                {cleanLabel(item.action)} {fileName(item.path)}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function SandboxPermissionPanel({ sandbox, health }) {
+  const posture = sandbox?.posture || health?.security || {};
+  const summary = sandbox?.summary || {};
+  const checks = sandbox?.checks || [];
+  const permissions = sandbox?.permissions || {};
+  const policy = sandbox?.policy || {};
+  const sensitiveEnv = sandbox?.secrets?.sensitiveEnv || {};
+  const readScopes = permissions.readScopes || [];
+  const writeScopes = permissions.writeScopes || [];
+  const executionScopes = permissions.executionScopes || [];
+  const networkScopes = permissions.networkScopes || [];
+  const scripts = sandbox?.scripts || {};
+
+  return (
+    <section className="insight-section sandbox-section" data-sandbox-guidance="phase6-sandbox-guidance">
+      <div className="insight-heading">
+        <span>Sandbox & Permissions</span>
+        <Pill tone={sandboxTone(sandbox?.status || posture.status)}>{cleanLabel(sandbox?.status || posture.boundary || "local only")}</Pill>
+      </div>
+      <div className="sandbox-metrics">
+        <InsightCard icon={ShieldCheck} label="Boundary" value={posture.localOnly === false ? "non-local" : "local only"} detail={posture.remoteAccess || "disabled_by_bind_host"} tone={posture.localOnly === false ? "bad" : "ok"} />
+        <InsightCard icon={Database} label="Writes" value={String(writeScopes.length)} detail={`${policy.requiresConfirmation?.length || 0} confirm`} tone="warn" />
+        <InsightCard icon={TerminalSquare} label="Scripts" value={String(scripts.count || 0)} detail={`${scripts.watch || 0} watch · ${scripts.blocked || 0} blocked`} tone={scripts.blocked ? "bad" : scripts.watch ? "warn" : "ok"} />
+        <InsightCard icon={Eye} label="Env Names" value={String(sensitiveEnv.count || 0)} detail={sensitiveEnv.valuesExposed ? "values exposed" : "values hidden"} tone={sensitiveEnv.count ? "warn" : "ok"} />
+      </div>
+      <div className="sandbox-boundary">
+        <div>
+          <strong>{posture.bindHost || "127.0.0.1"} · API :{posture.apiPort || health?.server?.port || "4147"} · UI :{posture.uiPort || health?.server?.uiPort || "5174"}</strong>
+          <span>{posture.summary || health?.security?.summary || "Trusted local-only boundary"}</span>
+        </div>
+        <Pill tone={posture.auth === "not_enabled" ? "ok" : "warn"}>{posture.auth || "not_enabled"}</Pill>
+      </div>
+      <div className="sandbox-policy-grid">
+        <div className="sandbox-policy-card">
+          <strong>Automatic</strong>
+          {(policy.allowedAutomations || []).slice(0, 5).map((item) => <span key={item}>{cleanLabel(item)}</span>)}
+        </div>
+        <div className="sandbox-policy-card">
+          <strong>Confirm</strong>
+          {(policy.requiresConfirmation || []).slice(0, 5).map((item) => <span key={item}>{cleanLabel(item)}</span>)}
+        </div>
+        <div className="sandbox-policy-card">
+          <strong>Blocked</strong>
+          {(policy.blockedByDefault || []).slice(0, 5).map((item) => <span key={item}>{cleanLabel(item)}</span>)}
+        </div>
+      </div>
+      <div className="sandbox-scope-row">
+        <span>{readScopes.length} read scope(s)</span>
+        <span>{writeScopes.length} write scope(s)</span>
+        <span>{executionScopes.length} execution scope(s)</span>
+        <span>{networkScopes.length} local network scope(s)</span>
+      </div>
+      <div className="sandbox-checks">
+        {checks.slice(0, 8).map((item) => (
+          <div className={`sandbox-check ${item.status}`} key={item.id}>
+            <Pill tone={sandboxTone(item.status)}>{cleanLabel(item.status)}</Pill>
+            <div>
+              <strong>{item.label}</strong>
+              <span>{item.detail}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="audit-counts">
+        <span className="ok">ok {summary.ok || 0}</span>
+        <span className={summary.watch ? "warn" : "ok"}>watch {summary.watch || 0}</span>
+        <span className={summary.blocked ? "bad" : "ok"}>blocked {summary.blocked || 0}</span>
+      </div>
+    </section>
+  );
+}
+
+function ProjectLauncherPanel({ launcher, config, onRefresh }) {
+  const [projectDirInput, setProjectDirInput] = useState(config?.projectDir || "");
+  const [launchPlan, setLaunchPlan] = useState(null);
+  const [launcherControl, setLauncherControl] = useState(null);
+  const [launcherLogs, setLauncherLogs] = useState(null);
+  const [launcherError, setLauncherError] = useState("");
+  const projects = launcher?.projects || [];
+  const current = launcher?.current || {};
+
+  useEffect(() => {
+    if (!projectDirInput && config?.projectDir) setProjectDirInput(config.projectDir);
+  }, [config?.projectDir, projectDirInput]);
+
+  const run = async (fn) => {
+    setLauncherError("");
+    try {
+      await fn();
+    } catch (err) {
+      setLauncherError(err.message || String(err));
+    }
+  };
+
+  const registerProject = async () => {
+    const clean = projectDirInput.trim();
+    if (!clean) throw new Error("Project directory is required.");
+    await api("/projects/register", {
+      method: "POST",
+      body: {
+        projectDir: clean,
+        create: true
+      }
+    });
+    await onRefresh?.();
+  };
+
+  const planLaunch = async (projectDir) => {
+    const plan = await api("/projects/launch", {
+      method: "POST",
+      body: {
+        projectDir,
+        dryRun: true
+      }
+    });
+    setLauncherControl(null);
+    setLaunchPlan(plan);
+  };
+
+  const startLaunch = async () => {
+    if (!launchPlan?.project?.projectDir) throw new Error("Plan a launch before starting.");
+    const plan = await api("/projects/launch", {
+      method: "POST",
+      body: {
+        projectDir: launchPlan.project.projectDir,
+        apiPort: launchPlan.apiPort,
+        uiPort: launchPlan.uiPort,
+        dryRun: false,
+        execute: true
+      }
+    });
+    setLaunchPlan(plan);
+    setLauncherControl(null);
+    await onRefresh?.();
+    await loadLogs(plan.project.projectDir);
+  };
+
+  const loadLogs = async (projectDir) => {
+    const logs = await api(`/projects/logs?projectDir=${encodeURIComponent(projectDir)}&limit=24`);
+    setLauncherLogs(logs);
+  };
+
+  const stopProject = async (project) => {
+    const result = await api("/projects/stop", {
+      method: "POST",
+      body: {
+        projectDir: project.projectDir,
+        dryRun: false,
+        execute: true
+      }
+    });
+    setLaunchPlan(null);
+    setLauncherControl(result);
+    await onRefresh?.();
+    await loadLogs(project.projectDir);
+  };
+
+  const restartProject = async (project) => {
+    const result = await api("/projects/restart", {
+      method: "POST",
+      body: {
+        projectDir: project.projectDir,
+        dryRun: false,
+        execute: true
+      }
+    });
+    setLaunchPlan(null);
+    setLauncherControl(result);
+    await onRefresh?.();
+    await loadLogs(project.projectDir);
+  };
+
+  return (
+    <section className="insight-section project-launcher-section" data-project-launcher="phase6-project-launcher">
+      <div className="insight-heading">
+        <span>Project Launcher</span>
+        <Pill tone={launcher?.boundary?.localOnly ? "ok" : "warn"}>{launcher?.boundary?.localOnly ? "local only" : "check boundary"}</Pill>
+      </div>
+      <div className="launcher-metrics">
+        <InsightCard icon={FolderOpen} label="Projects" value={String(projects.length)} detail={`${launcher?.registry?.count || 0} registered`} tone="ok" />
+        <InsightCard icon={TerminalSquare} label="Current API" value={`:${current.apiPort || config?.apiPort || 4147}`} detail={`UI :${current.uiPort || config?.uiPort || 5174}`} tone="ok" />
+        <InsightCard icon={ShieldCheck} label="Boundary" value="127.0.0.1" detail={launcher?.boundary?.auth || "not_enabled"} tone="ok" />
+      </div>
+      <div className="launcher-register">
+        <input
+          value={projectDirInput}
+          onChange={(event) => setProjectDirInput(event.target.value)}
+          placeholder="Project directory"
+          aria-label="Project directory"
+        />
+        <IconButton icon={Plus} onClick={() => run(registerProject)} dataAction="register-project">
+          Register
+        </IconButton>
+        <IconButton icon={RefreshCw} onClick={() => run(onRefresh)} dataAction="refresh-projects">
+          Refresh
+        </IconButton>
+      </div>
+      <div className="launcher-list">
+        {projects.slice(0, 6).map((project) => (
+          <div className={`launcher-project ${project.current ? "current" : ""}`} key={project.id}>
+            <div>
+              <strong title={project.projectDir}>{project.name}</strong>
+              <span title={project.projectDir}>
+                {project.current ? "current" : project.source} · {project.initialized ? "initialized" : "not started"} · {project.running ? `running :${project.running.apiPort}/:${project.running.uiPort}` : project.health?.memoryStatus || "memory unknown"}
+              </span>
+            </div>
+            <Pill tone={project.running ? "ok" : project.health?.manifestOk === false ? "warn" : project.exists ? "ok" : "bad"}>{project.running?.status || project.health?.status || "unknown"}</Pill>
+            <div className="launcher-project-actions">
+              <IconButton icon={Play} onClick={() => run(() => planLaunch(project.projectDir))} dataAction={`plan-launch-${project.id}`}>
+                Plan
+              </IconButton>
+              <IconButton icon={RefreshCw} onClick={() => run(() => restartProject(project))} dataAction={`restart-project-${project.id}`}>
+                Restart
+              </IconButton>
+              <IconButton icon={Eye} onClick={() => run(() => loadLogs(project.projectDir))} dataAction={`logs-project-${project.id}`}>
+                Logs
+              </IconButton>
+              <IconButton icon={XCircle} onClick={() => run(() => stopProject(project))} disabled={!project.running} dataAction={`stop-project-${project.id}`}>
+                Stop
+              </IconButton>
+            </div>
+          </div>
+        ))}
+      </div>
+      {launchPlan ? (
+        <div className={`launch-plan ${launchPlan.launched ? "ok" : "ready"}`}>
+          <div className="launch-plan-title">
+            <div>
+              <strong>{launchPlan.launched ? "Launching" : "Launch Plan"}</strong>
+              <span>{launchPlan.project?.name || "project"} · API :{launchPlan.apiPort} · UI :{launchPlan.uiPort}</span>
+            </div>
+            <Pill tone={launchPlan.launched ? "ok" : "warn"}>{launchPlan.status}</Pill>
+          </div>
+          <code>{launchPlan.command}</code>
+          <div className="transfer-toolbar">
+            <IconButton icon={Play} tone="primary" onClick={() => run(startLaunch)} disabled={launchPlan.launched} dataAction="start-launch">
+              Start
+            </IconButton>
+            <a href={launchPlan.url} target="_blank" rel="noreferrer">
+              {launchPlan.url}
+            </a>
+          </div>
+        </div>
+      ) : null}
+      {launcherControl ? (
+        <div className={`launch-plan ${launcherControl.launched || launcherControl.stopped ? "ok" : "ready"}`} data-launcher-control="true">
+          <div className="launch-plan-title">
+            <div>
+              <strong>{launcherControl.action === "restart" ? "Restart Control" : "Stop Control"}</strong>
+              <span>{launcherControl.project?.name || "project"} · {launcherControl.log?.path || "launcher log"}</span>
+            </div>
+            <Pill tone={launcherControl.launched || launcherControl.stopped ? "ok" : "warn"}>{launcherControl.status}</Pill>
+          </div>
+          {launcherControl.launch?.command || launcherControl.launchPlan?.command ? <code>{launcherControl.launch?.command || launcherControl.launchPlan?.command}</code> : null}
+          <div className="transfer-toolbar">
+            <IconButton icon={Eye} onClick={() => run(() => loadLogs(launcherControl.project.projectDir))} disabled={!launcherControl.project?.projectDir} dataAction="control-logs">
+              Logs
+            </IconButton>
+            {launcherControl.launch?.url || launcherControl.launchPlan?.url ? (
+              <a href={launcherControl.launch?.url || launcherControl.launchPlan?.url} target="_blank" rel="noreferrer">
+                {launcherControl.launch?.url || launcherControl.launchPlan?.url}
+              </a>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      {launcherLogs ? (
+        <div className="launcher-logs" data-launcher-logs="true">
+          <div className="launch-plan-title">
+            <div>
+              <strong>Process Logs</strong>
+              <span>{launcherLogs.project?.name || "project"} · {launcherLogs.log?.path}</span>
+            </div>
+            <Pill tone={launcherLogs.entries?.length ? "ok" : "warn"}>{launcherLogs.counts?.returned || 0} lines</Pill>
+          </div>
+          <div className="launcher-log-list">
+            {launcherLogs.entries?.length ? launcherLogs.entries.map((entry, index) => (
+              <div className={`launcher-log-line ${entry.stream || "lifecycle"}`} key={`${entry.at}-${index}`}>
+                <span>{entry.stream || "lifecycle"} · {entry.event || "output"} · {new Date(entry.at).toLocaleTimeString()}</span>
+                <code>{entry.text}</code>
+              </div>
+            )) : (
+              <div className="launcher-log-empty">No persisted process logs yet.</div>
+            )}
+          </div>
+        </div>
+      ) : null}
+      {launcherError ? <div className="transfer-error">{launcherError}</div> : null}
+    </section>
   );
 }
 
@@ -1606,6 +2280,9 @@ function CodeGraphPanel({ graph }) {
   const hotspots = graph.hotspots || [];
   const packages = graph.packages || [];
   const warnings = graph.warnings || [];
+  const recommendations = graph.coChangeRecommendations || [];
+  const symbolGraph = graph.symbolGraph || null;
+  const symbolHotspots = symbolGraph?.hotspots || [];
   return (
     <section className="insight-section code-graph" data-code-graph=".project-agent/architecture-map.json#codeGraph">
       <div className="insight-heading">
@@ -1618,16 +2295,59 @@ function CodeGraphPanel({ graph }) {
         <span className={graph.localEdgeCount ? "ok" : "warn"}>local {graph.localEdgeCount || 0}</span>
         <span className={graph.packageEdgeCount ? "ok" : "muted"}>packages {graph.packageEdgeCount || 0}</span>
         <span className={graph.unresolvedEdgeCount ? "warn" : "ok"}>unresolved {graph.unresolvedEdgeCount || 0}</span>
+        <span className={symbolGraph?.symbolCount ? "ok" : "muted"}>symbols {symbolGraph?.symbolCount || graph.symbolCount || 0}</span>
       </div>
       {changedImpact.length ? (
         <div className="code-graph-impact">
-          {changedImpact.slice(0, 6).map((item) => (
-            <div key={item.path} className={`code-graph-card ${item.dependents?.length ? "warn" : item.dependencies?.length ? "ok" : "muted"}`}>
-              <span>{item.risk || "impact"}</span>
-              <strong title={item.path}>{item.path}</strong>
-              <small title={(item.dependents || []).join(", ")}>dependents {(item.dependents || []).length}</small>
-              <small title={(item.dependencies || []).join(", ")}>deps {(item.dependencies || []).length}</small>
-            </div>
+          {changedImpact.slice(0, 6).map((item) => {
+            const reads = (item.recommendedReads || []).slice(0, 4);
+            const coChanged = (item.coChanged || []).slice(0, 3);
+            const symbolDependents = (item.symbolDependents || []).slice(0, 3);
+            const symbols = (item.symbols || []).slice(0, 3);
+            return (
+              <div key={item.path} className={`code-graph-card ${item.symbolDependents?.length || item.dependents?.length ? "warn" : item.dependencies?.length || item.tests?.length || item.symbols?.length ? "ok" : "muted"}`}>
+                <span>{item.risk || "impact"}</span>
+                <strong title={item.path}>{item.path}</strong>
+                <small title={symbols.map((symbol) => symbol.name).join(", ")}>symbols {symbols.length}</small>
+                <small title={(item.dependents || []).join(", ")}>dependents {(item.dependents || []).length}</small>
+                <small title={(item.dependencies || []).join(", ")}>deps {(item.dependencies || []).length}</small>
+                <small title={(item.tests || []).join(", ")}>tests {(item.tests || []).length}</small>
+                {symbolDependents.length ? (
+                  <div className="code-graph-card-symbols" title={symbolDependents.map((row) => `${row.source}:${row.local}`).join(", ")}>
+                    {symbolDependents.map((row) => <em key={`${row.source}-${row.local}`}>{fileName(row.source)}:{row.local}</em>)}
+                  </div>
+                ) : null}
+                {reads.length ? (
+                  <div className="code-graph-card-reads" title={reads.join(", ")}>
+                    <Eye size={11} />
+                    {reads.map((read) => <em key={read}>{fileName(read)}</em>)}
+                  </div>
+                ) : null}
+                {coChanged.length ? (
+                  <div className="code-graph-card-cochange" title={coChanged.join(", ")}>
+                    {coChanged.map((read) => <em key={read}>{fileName(read)}</em>)}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+      {symbolHotspots.length ? (
+        <div className="code-graph-symbols" data-code-graph-symbols="phase5-symbol-graph">
+          {symbolHotspots.slice(0, 5).map((item) => (
+            <span key={item.path} title={(item.refs || []).join(", ")}>
+              {fileName(item.path)} · symbols {(item.symbols || []).length} · callers {item.dependents || 0} · calls {item.calls || 0}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {recommendations.length ? (
+        <div className="code-graph-recommendations">
+          {recommendations.slice(0, 4).map((item) => (
+            <span key={item.path} title={[item.reason, ...(item.reads || [])].filter(Boolean).join(" · ")}>
+              {fileName(item.path)} · read {(item.reads || []).length} · tests {(item.tests || []).length}
+            </span>
           ))}
         </div>
       ) : null}
@@ -1748,6 +2468,8 @@ function PreEditRiskPanel({ risk }) {
   });
   const firstChecks = risk.firstChecks || [];
   const coChangePartners = risk.coChangePartners || [];
+  const inspectionCoverage = risk.inspectionCoverage || null;
+  const missingInspectionRefs = inspectionCoverage?.missingRefs || [];
   return (
     <section className="insight-section pre-edit-risk" data-pre-edit-risk=".project-agent/agent-context-bundle.json">
       <div className="insight-heading">
@@ -1758,6 +2480,7 @@ function PreEditRiskPanel({ risk }) {
       <div className="audit-counts">
         <span className={tone}>score {risk.score || "0/0"}</span>
         <span className={risk.testGap?.status === "warn" ? "warn" : "ok"}>tests {risk.testGap?.status || "unknown"}</span>
+        <span className={inspectionCoverage?.status === "warn" ? "warn" : "ok"}>inspect {inspectionCoverage?.missingCount || 0}/{inspectionCoverage?.requiredCount || 0}</span>
         <span className={risk.changedFiles?.length ? "warn" : "ok"}>files {risk.changedFiles?.length || 0}</span>
       </div>
       {firstChecks.length ? (
@@ -1765,6 +2488,15 @@ function PreEditRiskPanel({ risk }) {
           {firstChecks.slice(0, 4).map((item) => (
             <span key={item.id} title={(item.refs || []).join(" ")}>
               {item.action}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {inspectionCoverage ? (
+        <div className="pre-edit-inspection" title={inspectionCoverage.summary}>
+          {(missingInspectionRefs.length ? missingInspectionRefs : inspectionCoverage.inspectedRefs || []).slice(0, 4).map((ref) => (
+            <span key={ref} className={missingInspectionRefs.includes(ref) ? "warn" : "ok"}>
+              {missingInspectionRefs.includes(ref) ? "missing" : "seen"} {fileName(ref)}
             </span>
           ))}
         </div>
@@ -2229,6 +2961,262 @@ function GovernanceKernelPanel({
           </div>
         ))}
       </div>
+    </section>
+  );
+}
+
+function MemoryInventoryPanel({ inventory, search, audit, harness, consolidation, forgetPreview, onPreviewForget, onExecuteForget, onExecuteConsolidation, onSearchMemory }) {
+  const [searchFilters, setSearchFilters] = useState(initialMemoryFiltersFromLocation);
+  const [forgetConfirmed, setForgetConfirmed] = useState(false);
+  const [consolidationConfirmed, setConsolidationConfirmed] = useState(false);
+  useEffect(() => {
+    setForgetConfirmed(false);
+  }, [forgetPreview?.auditRef, forgetPreview?.dryRun]);
+  useEffect(() => {
+    setConsolidationConfirmed(false);
+  }, [consolidation?.generatedAt, consolidation?.dryRun]);
+  if (!inventory) return null;
+  const totals = inventory.totals || {};
+  const canonical = inventory.canonical || {};
+  const results = search?.results || [];
+  const auditEntries = audit?.entries || [];
+  const actionCounts = audit?.totals?.actionCounts || {};
+  const consolidationCandidates = consolidation?.candidates || [];
+  const consolidationTotals = consolidation?.totals || {};
+  const harnessReads = harness?.autoReads || [];
+  const harnessCalls = harness?.appliedCalls || [];
+  const harnessNextCalls = harness?.nextCalls || [];
+  const riskyFiles = inventory.riskyFiles || [];
+  const lifecycle = inventory.lifecycle || {};
+  const dogfood = lifecycle.dogfood || {};
+  const retention = lifecycle.retention || {};
+  const harnessLifecycle = harness?.lifecycle || {};
+  const harnessDogfood = harnessLifecycle.dogfood || dogfood;
+  const harnessRetention = harnessLifecycle.retention || retention;
+  const status = inventory.status || "unknown";
+  const memoryIndex = inventory.indexes?.memorySearch || {};
+  const entityIndex = inventory.indexes?.memoryEntities || {};
+  const vectorIndex = inventory.indexes?.memoryVectors || {};
+  const bm25Status = search?.ranking?.optionalIndexes?.bm25 || {};
+  const entityStatus = search?.ranking?.optionalIndexes?.entity || {};
+  const vectorStatus = search?.ranking?.optionalIndexes?.vector || {};
+  const searchMeta = search?.searched || {};
+  const appliedFilters = Object.entries(search?.filters || {}).filter(([, value]) => value !== "" && value !== null && value !== undefined);
+  const readyConsolidationCandidates = consolidationCandidates.filter((candidate) => candidate.status === "ready");
+  const forgetImpactCount = forgetPreview?.plan?.canonicalRecords?.length || 0;
+  const canExecuteForget = Boolean(forgetPreview?.dryRun && forgetImpactCount && forgetConfirmed);
+  const canExecuteConsolidation = Boolean(consolidation?.dryRun && readyConsolidationCandidates.length && consolidationConfirmed);
+  const dogfoodTone = dogfood.status === "seeded" ? "ok" : dogfood.status === "unavailable" ? "muted" : "warn";
+  const retentionTone = Number(retention.totals?.actionable || 0) ? "warn" : retention.status === "ok" ? "ok" : "muted";
+  const updateSearchFilter = (key, value) => setSearchFilters((current) => ({ ...current, [key]: value }));
+  const runSearchFromControls = (event) => {
+    const panel = event.currentTarget.closest(".memory-search-panel");
+    const values = {};
+    panel?.querySelectorAll("input[name], select[name]").forEach((control) => {
+      values[control.name] = control.value;
+    });
+    onSearchMemory?.({ ...searchFilters, ...values });
+  };
+  return (
+    <section className="memory-inventory" data-memory-lifecycle="p0-memory-lifecycle">
+      <div className="insight-heading">
+        <span>Canonical Memory</span>
+        <Pill tone={status === "ok" ? "ok" : "warn"}>{cleanLabel(status)}</Pill>
+      </div>
+      <div className="memory-inventory-grid">
+        <InsightCard icon={Database} label="Records" value={String(totals.canonicalRecords || 0)} detail={`${canonical.invalidRecords || totals.invalidRecords || 0} invalid`} tone={totals.invalidRecords ? "warn" : "ok"} />
+        <InsightCard icon={FileText} label="Source" value={String(totals.sourceFiles || 0)} detail={formatBytes(totals.sourceBytes || 0)} tone="ok" />
+        <InsightCard icon={History} label="Derived" value={String(totals.derivedFiles || 0)} detail={formatBytes(totals.derivedBytes || 0)} tone={totals.derivedFiles ? "warn" : "muted"} />
+        <InsightCard icon={ShieldCheck} label="Risk" value={String(riskyFiles.length)} detail={riskyFiles[0]?.riskFlags?.[0] || "clean"} tone={riskyFiles.length ? "warn" : "ok"} />
+        <InsightCard icon={Search} label="Index" value={cleanLabel(memoryIndex.status || "missing")} detail={`${memoryIndex.engine || "bm25"} · ${memoryIndex.sourceRecords || 0} records`} tone={memoryIndex.status === "fresh" ? "ok" : memoryIndex.status === "missing" ? "muted" : "warn"} />
+        <InsightCard icon={Network} label="Entities" value={cleanLabel(entityIndex.status || "missing")} detail={`${entityIndex.statistics?.entityCount || 0} nodes · ${entityIndex.statistics?.edgeCount || 0} links`} tone={entityIndex.status === "fresh" ? "ok" : entityIndex.status === "missing" ? "muted" : "warn"} />
+        <InsightCard icon={Brain} label="Vector" value={cleanLabel(vectorIndex.status || "missing")} detail={`${vectorIndex.statistics?.dimensions || vectorIndex.params?.dimensions || 0} dims · ${vectorIndex.embeddingProvider || "none"}`} tone={vectorIndex.status === "fresh" ? "ok" : vectorIndex.status === "missing" ? "muted" : "warn"} />
+        <InsightCard icon={Sparkles} label="Dogfood" value={cleanLabel(dogfood.status || "unknown")} detail={`${dogfood.present || 0}/${dogfood.expected || 0} seeded`} tone={dogfoodTone} />
+        <InsightCard icon={RefreshCw} label="Retention" value={String(retention.totals?.actionable || 0)} detail={`${retention.totals?.generatedOverLimit || 0} generated`} tone={retentionTone} />
+      </div>
+      {inventory.missingExpected?.length ? (
+        <div className="memory-surface-list">
+          {inventory.missingExpected.slice(0, 4).map((ref) => (
+            <span key={ref} title={ref}>{fileName(ref)}</span>
+          ))}
+        </div>
+      ) : null}
+      <div className="memory-search-panel">
+        <div className="memory-search-controls">
+          <input name="query" aria-label="Memory query" placeholder="Search memory" value={searchFilters.query} onChange={(event) => updateSearchFilter("query", event.target.value)} />
+          <select name="type" aria-label="Memory type" value={searchFilters.type} onChange={(event) => updateSearchFilter("type", event.target.value)}>
+            <option value="">All types</option>
+            {["episode", "fact", "decision", "procedure", "evidence", "risk"].map((type) => (
+              <option key={type} value={type}>{cleanLabel(type)}</option>
+            ))}
+          </select>
+          <input name="folder" aria-label="Memory folder" placeholder="Folder" value={searchFilters.folder} onChange={(event) => updateSearchFilter("folder", event.target.value)} />
+          <input name="fileType" aria-label="Memory file type" placeholder="File type" value={searchFilters.fileType} onChange={(event) => updateSearchFilter("fileType", event.target.value)} />
+          <input name="concept" aria-label="Memory concept" placeholder="Concept" value={searchFilters.concept} onChange={(event) => updateSearchFilter("concept", event.target.value)} />
+          <select name="sourceQuality" aria-label="Source quality" value={searchFilters.sourceQuality} onChange={(event) => updateSearchFilter("sourceQuality", event.target.value)}>
+            <option value="">Any quality</option>
+            <option value="strong">Strong</option>
+            <option value="watch">Watch</option>
+            <option value="weak">Weak</option>
+          </select>
+          <select name="useIndex" aria-label="Search index" value={searchFilters.useIndex} onChange={(event) => updateSearchFilter("useIndex", event.target.value)}>
+            <option value="">Deterministic</option>
+            <option value="bm25">BM25 cache</option>
+            <option value="entity">Entity graph</option>
+            <option value="vector">Vector rerank</option>
+            <option value="hybrid">Hybrid cache</option>
+          </select>
+          <button type="button" className="memory-preview-button" onClick={runSearchFromControls}>
+            <Search size={12} />
+            <span>Search</span>
+          </button>
+        </div>
+        <div className="memory-search-meta">
+          <em>{searchMeta.filteredRecords ?? searchMeta.records ?? 0}/{searchMeta.records ?? 0} records</em>
+          {appliedFilters.slice(0, 4).map(([key, value]) => (
+            <em key={key} title={`${key}: ${value}`}>{cleanLabel(key).toLowerCase()} · {String(value)}</em>
+          ))}
+          <em title="Optional rebuildable search cache">bm25 · {bm25Status.used ? "used" : bm25Status.status || memoryIndex.status || "missing"}</em>
+          <em title="Optional rebuildable entity graph">entity · {entityStatus.used ? "used" : entityStatus.status || entityIndex.status || "missing"}</em>
+          <em title="Optional local lexical-vector cache">vector · {vectorStatus.used ? "used" : vectorStatus.status || vectorIndex.status || "missing"}</em>
+        </div>
+      </div>
+      {results.length ? (
+        <div className="memory-record-list">
+          {results.slice(0, 5).map((item) => {
+            const visibleRef =
+              item.refs?.find((ref) => !String(ref).startsWith(".project-agent/")) ||
+              item.refs?.find((ref) => !String(ref).startsWith(".project-agent/memory/")) ||
+              item.refs?.[0];
+            return (
+              <div key={item.id} className="memory-record">
+                <div>
+                  <strong title={item.title}>{item.title}</strong>
+                  <span>{item.type} · score {item.score} · {item.sourceQuality?.status || "quality"}</span>
+                </div>
+                {item.snippet ? <p className="memory-record-snippet">{item.snippet}</p> : null}
+                <small className="memory-record-ref" title={item.refs?.join(" · ")}>{visibleRef}</small>
+                <button type="button" className="memory-preview-button" onClick={() => onPreviewForget?.(item)}>
+                  <Eye size={12} />
+                  <span>Preview forget</span>
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      ) : search ? (
+        <Empty title="No matching memory" body={appliedFilters.length ? "Broaden the filters or let the harness route memory automatically." : "Canonical memory has no records for this query yet."} />
+      ) : null}
+      {forgetPreview ? (
+        <div className="memory-forget-preview">
+          <strong>{forgetPreview.dryRun ? "Dry-run preview" : "Forget result"}</strong>
+          <span>{forgetPreview.summary}</span>
+          <div>
+            <em>{forgetPreview.plan?.canonicalRecords?.length || 0} records</em>
+            <em>{forgetPreview.plan?.runtimeEvents?.length || 0} runtime</em>
+            <em>{forgetPreview.plan?.generatedFiles?.length || 0} generated</em>
+          </div>
+          {forgetPreview.dryRun && forgetImpactCount ? (
+            <div className="memory-confirm-strip">
+              <label className="memory-confirm-toggle">
+                <input type="checkbox" checked={forgetConfirmed} onChange={(event) => setForgetConfirmed(event.target.checked)} />
+                <span>Confirm delete</span>
+              </label>
+              <button type="button" className="memory-preview-button danger" disabled={!canExecuteForget} onClick={() => onExecuteForget?.(forgetPreview)}>
+                <XCircle size={12} />
+                <span>Execute delete</span>
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {harness ? (
+        <div className="memory-harness-panel">
+          <div className="memory-harness-head">
+            <strong>AI memory harness</strong>
+            <Pill tone={harness.status === "ready" ? "ok" : "warn"}>{cleanLabel(harness.status)}</Pill>
+          </div>
+          <span title={harness.query}>{harness.summary || "Automatic memory routing is active."}</span>
+          <div className="memory-harness-calls">
+            {harnessCalls.slice(0, 4).map((call, index) => (
+              <em key={`${call.tool}-${index}`} title={call.reason}>{call.tool}</em>
+            ))}
+          </div>
+          <div className="memory-lifecycle-strip">
+            <em title={harnessDogfood.summary || dogfood.summary}>dogfood · {cleanLabel(harnessDogfood.status || "unknown")}</em>
+            <em title={harnessRetention.summary || retention.summary}>retention · {harnessRetention.totals?.actionable || 0}</em>
+            {harnessNextCalls.slice(0, 3).map((call, index) => (
+              <em key={`${call.tool}-${index}`} title={call.reason}>next · {call.tool}</em>
+            ))}
+          </div>
+          {harnessReads.slice(0, 3).map((read) => (
+            <div key={read.ref} className="memory-harness-read">
+              <div>
+                <strong title={read.title}>{read.title}</strong>
+                <span>{read.type} · confidence {Math.round(Number(read.confidence || 0) * 100)}%</span>
+              </div>
+              <small title={read.ref}>{read.ref}</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {consolidation ? (
+        <div className="memory-consolidation-panel">
+          <div className="memory-consolidation-head">
+            <strong>Consolidation proposals</strong>
+            <span>{consolidationTotals.ready || 0}/{consolidationTotals.candidates || 0} ready</span>
+          </div>
+          <div className="memory-consolidation-counts">
+            <em>{consolidationTotals.lowConfidence || 0} low confidence</em>
+            <em>{consolidationTotals.duplicates || 0} duplicate</em>
+            {!consolidation.dryRun ? <em>{consolidationTotals.created || 0} created</em> : null}
+          </div>
+          {consolidation.dryRun && readyConsolidationCandidates.length ? (
+            <div className="memory-confirm-strip">
+              <label className="memory-confirm-toggle">
+                <input type="checkbox" checked={consolidationConfirmed} onChange={(event) => setConsolidationConfirmed(event.target.checked)} />
+                <span>Confirm promote</span>
+              </label>
+              <button type="button" className="memory-preview-button" disabled={!canExecuteConsolidation} onClick={() => onExecuteConsolidation?.(readyConsolidationCandidates)}>
+                <Plus size={12} />
+                <span>Promote ready</span>
+              </button>
+            </div>
+          ) : null}
+          {consolidationCandidates.slice(0, 5).map((candidate) => (
+            <div key={candidate.id} className="memory-consolidation-row">
+              <div>
+                <strong title={candidate.title}>{candidate.title}</strong>
+                <span>{candidate.type} · {cleanLabel(candidate.status)} · {Math.round(Number(candidate.confidence || 0) * 100)}%</span>
+              </div>
+              <small title={candidate.sourceRefs?.join(" · ")}>{candidate.sourceRefs?.[0]}</small>
+            </div>
+          ))}
+          {!consolidationCandidates.length ? <Empty title="No consolidation proposals" body="The harness will keep watching runtime, handoff, and architecture signals." /> : null}
+        </div>
+      ) : null}
+      {auditEntries.length ? (
+        <div className="memory-audit-timeline">
+          <div className="memory-audit-head">
+            <strong>Audit timeline</strong>
+            <span>{auditEntries.length}/{audit?.totals?.entries || 0}</span>
+          </div>
+          <div className="memory-audit-counts">
+            {Object.entries(actionCounts).slice(0, 4).map(([action, count]) => (
+              <em key={action} title={action}>{cleanLabel(action)} · {count}</em>
+            ))}
+          </div>
+          {auditEntries.slice(0, 5).map((entry) => (
+            <div key={entry.id} className="memory-audit-row">
+              <div>
+                <strong title={entry.summary}>{cleanLabel(entry.action)}</strong>
+                <span>{entry.dryRun === true ? "dry-run" : entry.mode || entry.type || "audit"}</span>
+              </div>
+              <small title={entry.ref}>{entry.createdAt ? new Date(entry.createdAt).toLocaleString() : entry.ref}</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -3226,6 +4214,17 @@ function RunContextSidecar({
   process,
   flow,
   memoryGraph,
+  memoryInventory,
+  memorySearch,
+  memoryAudit,
+  memoryHarness,
+  memoryConsolidation,
+  memoryForgetPreview,
+  projectLauncher,
+  sandboxGuidance,
+  agentBootstrap,
+  config,
+  health,
   architectureMap,
   architecture,
   continuity,
@@ -3239,13 +4238,20 @@ function RunContextSidecar({
   activeGoalId,
   setActiveGoalId,
   onCreateGoal,
+  onPreviewMemoryForget,
+  onExecuteMemoryForget,
+  onExecuteMemoryConsolidation,
+  onSearchMemory,
+  onStateImported,
+  onRefreshProjects,
   canComplete,
   onComplete,
   onHandoff,
   onAudit
 }) {
-  const [openDrawer, setOpenDrawer] = useState("");
-  const [mapView, setMapView] = useState("process");
+  const initialMapView = initialMapViewFromLocation();
+  const [openDrawer, setOpenDrawer] = useState(initialMapView ? "map" : "");
+  const [mapView, setMapView] = useState(initialMapView || "process");
   const contextBundle = continuity?.agentContextBundle || null;
   const takeoverSummary = continuity?.takeoverSummary || null;
   const current = takeoverSummary?.currentState || processTrace?.current || step;
@@ -3398,7 +4404,8 @@ function RunContextSidecar({
               ["process", "Process"],
               ["memory", "Memory"],
               ["graph", "Graph"],
-              ["architecture", "Architecture"]
+              ["architecture", "Architecture"],
+              ["product", "Product"]
             ].map(([id, label]) => (
               <button type="button" key={id} className={mapView === id ? "active" : ""} onClick={() => setMapView(id)}>
                 {label}
@@ -3418,10 +4425,34 @@ function RunContextSidecar({
               developmentTrail={developmentTrail}
             />
           ) : null}
-          {mapView === "memory" ? <MemoryGraph graph={memoryGraph} /> : null}
+          {mapView === "memory" ? (
+            <>
+              <MemoryInventoryPanel
+                inventory={memoryInventory}
+                search={memorySearch}
+                audit={memoryAudit}
+                harness={memoryHarness}
+                consolidation={memoryConsolidation}
+                forgetPreview={memoryForgetPreview}
+                onPreviewForget={onPreviewMemoryForget}
+                onExecuteForget={onExecuteMemoryForget}
+                onExecuteConsolidation={onExecuteMemoryConsolidation}
+                onSearchMemory={onSearchMemory}
+              />
+              <MemoryGraph graph={memoryGraph} />
+            </>
+          ) : null}
           {mapView === "process" ? <ProcessTimeline process={processTrace || process} steps={flow} developmentTrail={developmentTrail} /> : null}
           {mapView === "graph" ? <CodeGraphPanel graph={codeGraph} /> : null}
           {mapView === "architecture" ? <ArchitecturePanel architecture={architectureMap || architecture} /> : null}
+          {mapView === "product" ? (
+            <>
+              <AgentBootstrapPanel bootstrap={agentBootstrap} />
+              <SandboxPermissionPanel sandbox={sandboxGuidance} health={health} />
+              <ProjectLauncherPanel launcher={projectLauncher} config={config} onRefresh={onRefreshProjects} />
+              <StateTransferPanel inventory={memoryInventory} health={health} onImported={onStateImported} />
+            </>
+          ) : null}
         </div>
       </details>
 
@@ -3507,12 +4538,29 @@ function AgentStatePanel({
   audit,
   handoff,
   insights,
+  memoryInventory,
+  memorySearch,
+  memoryAudit,
+  memoryHarness,
+  memoryConsolidation,
+  memoryForgetPreview,
+  projectLauncher,
+  sandboxGuidance,
+  agentBootstrap,
+  config,
+  health,
   terminalSnapshot,
   role,
   setRole,
   activeGoalId,
   setActiveGoalId,
   onCreateGoal,
+  onPreviewMemoryForget,
+  onExecuteMemoryForget,
+  onExecuteMemoryConsolidation,
+  onSearchMemory,
+  onStateImported,
+  onRefreshProjects,
   onSaveCommand,
   onAudit,
   onComplete,
@@ -3560,6 +4608,17 @@ function AgentStatePanel({
       process={process}
       flow={flow}
       memoryGraph={memoryGraph}
+      memoryInventory={memoryInventory}
+      memorySearch={memorySearch}
+      memoryAudit={memoryAudit}
+      memoryHarness={memoryHarness}
+      memoryConsolidation={memoryConsolidation}
+      memoryForgetPreview={memoryForgetPreview}
+      projectLauncher={projectLauncher}
+      sandboxGuidance={sandboxGuidance}
+      agentBootstrap={agentBootstrap}
+      config={config}
+      health={health}
       architectureMap={architectureMap}
       architecture={architecture}
       continuity={continuity}
@@ -3573,6 +4632,12 @@ function AgentStatePanel({
       activeGoalId={activeGoalId}
       setActiveGoalId={setActiveGoalId}
       onCreateGoal={onCreateGoal}
+      onPreviewMemoryForget={onPreviewMemoryForget}
+      onExecuteMemoryForget={onExecuteMemoryForget}
+      onExecuteMemoryConsolidation={onExecuteMemoryConsolidation}
+      onSearchMemory={onSearchMemory}
+      onStateImported={onStateImported}
+      onRefreshProjects={onRefreshProjects}
       canComplete={canComplete}
       onComplete={onComplete}
       onHandoff={onHandoff}
@@ -3804,22 +4869,66 @@ export default function App({ TerminalClass, FitAddonClass }) {
   const [activeGoalId, setActiveGoalId] = useState("");
   const [packet, setPacket] = useState(null);
   const [insights, setInsights] = useState(null);
+  const [health, setHealth] = useState(null);
+  const [connection, setConnection] = useState({
+    status: "checking",
+    failures: 0,
+    lastOkAt: null,
+    lastError: "",
+    nextRetryAt: null
+  });
+  const [memoryInventory, setMemoryInventory] = useState(null);
+  const [memorySearch, setMemorySearch] = useState(null);
+  const [memoryAudit, setMemoryAudit] = useState(null);
+  const [memoryHarness, setMemoryHarness] = useState(null);
+  const [memoryConsolidation, setMemoryConsolidation] = useState(null);
+  const [memoryForgetPreview, setMemoryForgetPreview] = useState(null);
+  const [projectLauncher, setProjectLauncher] = useState(null);
+  const [sandboxGuidance, setSandboxGuidance] = useState(null);
+  const [agentBootstrap, setAgentBootstrap] = useState(null);
   const [audit, setAudit] = useState(null);
   const [handoff, setHandoff] = useState("");
   const [terminalSnapshot, setTerminalSnapshot] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const refreshAllRef = useRef(null);
+  const consolidationExecutionRef = useRef(null);
+
+  const markOnline = useCallback((nextHealth) => {
+    setHealth(nextHealth);
+    setConnection({
+      status: "online",
+      failures: 0,
+      lastOkAt: Date.now(),
+      lastError: "",
+      nextRetryAt: null
+    });
+  }, []);
+
+  const markOffline = useCallback((err) => {
+    setConnection((current) => {
+      const failures = (current.failures || 0) + 1;
+      const delay = Math.min(15000, 1200 * failures);
+      return {
+        status: "offline",
+        failures,
+        lastOkAt: current.lastOkAt || null,
+        lastError: err?.message || String(err || "API unavailable"),
+        nextRetryAt: Date.now() + delay
+      };
+    });
+  }, []);
 
   const loadState = useCallback(async () => {
-    const [cfg, nextState] = await Promise.all([api("/config"), api("/state")]);
+    const [nextHealth, cfg, nextState] = await Promise.all([api("/health"), api("/config"), api("/state")]);
+    markOnline(nextHealth);
     setConfig(cfg);
     setState(nextState);
     const goalIds = new Set((nextState.goals || []).map((goal) => goal.id));
     const selected = activeGoalId && goalIds.has(activeGoalId) ? activeGoalId : nextState.activeGoal?.id || "";
     if (selected !== activeGoalId) setActiveGoalId(selected);
     return { cfg, nextState, selected };
-  }, [activeGoalId]);
+  }, [activeGoalId, markOnline]);
 
   const loadKernel = useCallback(async () => {
     if (!state.initialized) return;
@@ -3835,8 +4944,15 @@ export default function App({ TerminalClass, FitAddonClass }) {
     const goal = activeGoalId || state.activeGoal?.id || "";
     const query = new URLSearchParams({ role });
     if (goal) query.set("goal", goal);
-    setInsights(await api(`/insights?${query.toString()}`));
-  }, [activeGoalId, role, state.activeGoal?.id]);
+    try {
+      const [nextHealth, nextInsights] = await Promise.all([api("/health"), api(`/insights?${query.toString()}`)]);
+      markOnline(nextHealth);
+      setInsights(nextInsights);
+    } catch (err) {
+      markOffline(err);
+      throw err;
+    }
+  }, [activeGoalId, role, state.activeGoal?.id, markOnline, markOffline]);
 
   const refreshAll = useCallback(async () => {
     try {
@@ -3845,16 +4961,59 @@ export default function App({ TerminalClass, FitAddonClass }) {
       if (nextState.initialized) {
         const query = new URLSearchParams({ role });
         if (selected) query.set("goal", selected);
-        setPacket(await api(`/kernel?${query.toString()}`));
-        setInsights(await api(`/insights?${query.toString()}`));
+        const memorySearchPath = memorySearchPathFromLocation();
+        const [nextPacket, nextInsights, nextMemoryInventory, nextMemorySearch, nextMemoryAudit, nextMemoryHarness, nextMemoryConsolidation, nextProjectLauncher, nextSandboxGuidance, nextAgentBootstrap] = await Promise.all([
+          api(`/kernel?${query.toString()}`),
+          api(`/insights?${query.toString()}`),
+          api("/memory/inventory"),
+          api(memorySearchPath),
+          api("/memory/audit?limit=5"),
+          api("/memory/harness?limit=6&maxReads=3&candidateLimit=5"),
+          api("/memory/consolidate?mode=session&limit=5"),
+          api("/projects"),
+          api("/security/sandbox"),
+          api("/agent/bootstrap")
+        ]);
+        setPacket(nextPacket);
+        setInsights(nextInsights);
+        setMemoryInventory(nextMemoryInventory);
+        setMemorySearch(nextMemorySearch);
+        setMemoryAudit(nextMemoryAudit);
+        setMemoryHarness(nextMemoryHarness);
+        setProjectLauncher(nextProjectLauncher);
+        setSandboxGuidance(nextSandboxGuidance);
+        setAgentBootstrap(nextAgentBootstrap);
+        const heldConsolidation = consolidationExecutionRef.current;
+        if (heldConsolidation && Date.now() < heldConsolidation.until) {
+          setMemoryConsolidation(heldConsolidation.result);
+        } else {
+          consolidationExecutionRef.current = null;
+          setMemoryConsolidation(nextMemoryConsolidation);
+        }
       } else {
-        setInsights(await api("/insights"));
+        const [nextInsights, nextMemoryInventory, nextMemoryAudit, nextMemoryHarness, nextMemoryConsolidation, nextProjectLauncher, nextSandboxGuidance, nextAgentBootstrap] = await Promise.all([api("/insights"), api("/memory/inventory"), api("/memory/audit?limit=5"), api("/memory/harness?limit=6&maxReads=3&candidateLimit=5"), api("/memory/consolidate?mode=session&limit=5"), api("/projects"), api("/security/sandbox"), api("/agent/bootstrap")]);
+        setInsights(nextInsights);
+        setMemoryInventory(nextMemoryInventory);
+        setMemoryAudit(nextMemoryAudit);
+        setMemoryHarness(nextMemoryHarness);
+        setProjectLauncher(nextProjectLauncher);
+        setSandboxGuidance(nextSandboxGuidance);
+        setAgentBootstrap(nextAgentBootstrap);
+        const heldConsolidation = consolidationExecutionRef.current;
+        if (heldConsolidation && Date.now() < heldConsolidation.until) {
+          setMemoryConsolidation(heldConsolidation.result);
+        } else {
+          consolidationExecutionRef.current = null;
+          setMemoryConsolidation(nextMemoryConsolidation);
+        }
+        setMemorySearch(null);
       }
       setTerminalSnapshot(await api("/terminal/snapshot"));
     } catch (err) {
+      markOffline(err);
       setError(err.message);
     }
-  }, [loadState, role]);
+  }, [loadState, role, markOffline]);
 
   useEffect(() => {
     refreshAllRef.current = refreshAll;
@@ -3931,6 +5090,101 @@ export default function App({ TerminalClass, FitAddonClass }) {
       const goal = activeGoalId || state.activeGoal?.id;
       setAudit(await api(`/audit/${goal}`));
     });
+  const previewMemoryForget = (item) =>
+    withBusy(async () => {
+      const result = await api("/memory/forget", {
+        method: "POST",
+        body: {
+          ref: item.refs?.[0],
+          mode: "delete",
+          dryRun: true,
+          reason: "UI preview"
+        }
+      });
+      setMemoryForgetPreview(result);
+    });
+  const refreshMemorySideEffects = async ({ includeConsolidation = true } = {}) => {
+    const [nextMemoryInventory, nextMemoryAudit, nextMemoryHarness, nextMemoryConsolidation] = await Promise.all([
+      api("/memory/inventory"),
+      api("/memory/audit?limit=5"),
+      api("/memory/harness?limit=6&maxReads=3&candidateLimit=5"),
+      includeConsolidation ? api("/memory/consolidate?mode=session&limit=5") : Promise.resolve(null)
+    ]);
+    setMemoryInventory(nextMemoryInventory);
+    setMemoryAudit(nextMemoryAudit);
+    setMemoryHarness(nextMemoryHarness);
+    if (includeConsolidation) setMemoryConsolidation(nextMemoryConsolidation);
+  };
+  const executeMemoryForget = async (preview = {}) => {
+    setBusy(true);
+    setError("");
+    try {
+      const refs = (preview.plan?.canonicalRecords || []).map((record) => record.ref).filter(Boolean);
+      if (!refs.length) throw new Error("No forget target is available from the dry-run preview.");
+      const result = await api("/memory/forget", {
+        method: "POST",
+        body: {
+          refs,
+          mode: preview.mode || "delete",
+          dryRun: false,
+          reason: "UI confirmed forget"
+        }
+      });
+      setMemoryForgetPreview(result);
+      const affectedIds = new Set((result.plan?.canonicalRecords || []).map((record) => record.id));
+      setMemorySearch((current) => current ? { ...current, results: (current.results || []).filter((item) => !affectedIds.has(item.id)) } : current);
+      await refreshMemorySideEffects();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const executeMemoryConsolidation = async (candidates = []) => {
+    setBusy(true);
+    setError("");
+    try {
+      const candidateIds = candidates.map((candidate) => candidate.id).filter(Boolean);
+      if (!candidateIds.length) throw new Error("No ready consolidation candidates are available.");
+      const result = await api("/memory/consolidate", {
+        method: "POST",
+        body: {
+          mode: "manual",
+          dryRun: false,
+          candidateIds,
+          limit: Math.max(5, candidateIds.length)
+        }
+      });
+      consolidationExecutionRef.current = { result, until: Date.now() + 12000 };
+      setMemoryConsolidation(result);
+      await refreshMemorySideEffects({ includeConsolidation: false });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const searchMemoryRecords = async (filters = {}) => {
+    setBusy(true);
+    setError("");
+    try {
+      const query = new URLSearchParams({ limit: "5" });
+      Object.entries(filters).forEach(([key, value]) => {
+        const clean = String(value || "").trim();
+        if (clean) query.set(key, clean);
+      });
+      setMemorySearch(await api(`/memory/search?${query.toString()}`));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const refreshProjects = async () => {
+    const [nextProjectLauncher, nextSandboxGuidance] = await Promise.all([api("/projects"), api("/security/sandbox")]);
+    setProjectLauncher(nextProjectLauncher);
+    setSandboxGuidance(nextSandboxGuidance);
+  };
   const completeGoal = () => withBusy(() => api(`/audit/${activeGoalId || state.activeGoal?.id}/complete`, { method: "POST" }));
   const generateHandoff = () =>
     withBusy(async () => {
@@ -3966,6 +5220,7 @@ export default function App({ TerminalClass, FitAddonClass }) {
           </div>
         </div>
         <div className="header-controls">
+          <HealthStrip health={health} connection={connection} onRetry={refreshAll} />
           <IconButton icon={RefreshCw} onClick={refreshAll} disabled={busy}>
             Sync
           </IconButton>
@@ -3976,6 +5231,7 @@ export default function App({ TerminalClass, FitAddonClass }) {
       </header>
 
       {error ? <div className="error-bar">{error}</div> : null}
+      {isAuthErrorMessage(error) ? <AuthUnlockPanel onSaved={refreshAll} /> : null}
 
       <main className="workspace">
         <TerminalPane
@@ -3992,12 +5248,29 @@ export default function App({ TerminalClass, FitAddonClass }) {
           audit={audit}
           handoff={handoff}
           insights={insights}
+          memoryInventory={memoryInventory}
+          memorySearch={memorySearch}
+          memoryAudit={memoryAudit}
+          memoryHarness={memoryHarness}
+          memoryConsolidation={memoryConsolidation}
+          memoryForgetPreview={memoryForgetPreview}
+          projectLauncher={projectLauncher}
+          sandboxGuidance={sandboxGuidance}
+          agentBootstrap={agentBootstrap}
+          config={config}
+          health={health}
           terminalSnapshot={terminalSnapshot}
           role={role}
           setRole={setRole}
           activeGoalId={activeGoalId}
           setActiveGoalId={setActiveGoalId}
           onCreateGoal={createGoal}
+          onPreviewMemoryForget={previewMemoryForget}
+          onExecuteMemoryForget={executeMemoryForget}
+          onExecuteMemoryConsolidation={executeMemoryConsolidation}
+          onSearchMemory={searchMemoryRecords}
+          onStateImported={refreshAll}
+          onRefreshProjects={refreshProjects}
           onSaveCommand={saveCommand}
           onAudit={runAudit}
           onComplete={completeGoal}

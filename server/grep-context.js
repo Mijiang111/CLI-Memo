@@ -35,6 +35,14 @@ function compact(value, max = 240) {
   return `${text.slice(0, max - 3)}...`;
 }
 
+function normalizeFilter(value) {
+  return String(value || "").trim().replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+function normalizeFileType(value) {
+  return String(value || "").trim().replace(/^\./, "").toLowerCase();
+}
+
 function isTextFile(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   return TEXT_EXTENSIONS.has(ext);
@@ -88,6 +96,26 @@ function resolveProjectRef(projectDir, ref) {
     throw error;
   }
   return { relPath, abs };
+}
+
+function contextFilters(options = {}) {
+  return {
+    file: normalizeFilter(options.file || ""),
+    folder: normalizeFilter(options.folder || ""),
+    fileType: normalizeFileType(options.fileType || options.ext || options.extension || "")
+  };
+}
+
+function visibleContextFilters(filters = {}) {
+  return Object.fromEntries(Object.entries(filters).filter(([, value]) => Boolean(value)));
+}
+
+function fileMatchesContextFilters(relPath, filters = {}) {
+  const clean = normalizeFilter(relPath);
+  if (filters.file && clean !== filters.file && !clean.includes(filters.file)) return false;
+  if (filters.folder && filters.folder !== "." && clean !== filters.folder && !clean.startsWith(`${filters.folder}/`)) return false;
+  if (filters.fileType && path.extname(clean).replace(/^\./, "").toLowerCase() !== filters.fileType) return false;
+  return true;
 }
 
 export function selectJsonPath(value, selector = "") {
@@ -175,6 +203,7 @@ function tokenize(query) {
 function walkFiles(projectDir, options = {}) {
   const maxFiles = Number(options.maxFiles || 500);
   const maxFileBytes = Number(options.maxFileBytes || 1024 * 1024);
+  const filters = contextFilters(options);
   const files = [];
   const visit = (dir, relDir = "") => {
     if (files.length >= maxFiles) return;
@@ -205,7 +234,7 @@ function walkFiles(projectDir, options = {}) {
       } catch {
         continue;
       }
-      if (stat.size > maxFileBytes) continue;
+      if (stat.size > maxFileBytes || !fileMatchesContextFilters(relPath, filters)) continue;
       files.push({ relPath, abs, bytes: stat.size, mtimeMs: stat.mtimeMs, priority: priorityForPath(relPath) });
     }
   };
@@ -256,6 +285,7 @@ export function searchContext(projectDir, options = {}) {
   const terms = tokenize(query);
   const phrase = String(query || "").toLowerCase().trim();
   const limit = Math.max(1, Math.min(50, Number(options.limit || 10)));
+  const filters = contextFilters(options);
   const files = walkFiles(projectDir, options);
   const rawMatches = [];
   let scannedBytes = 0;
@@ -322,6 +352,7 @@ export function searchContext(projectDir, options = {}) {
     mode: "grep-first",
     query,
     terms,
+    filters: visibleContextFilters(filters),
     budget: {
       llmCalls: 0,
       scannedFiles: files.length,

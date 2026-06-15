@@ -1,6 +1,6 @@
 import express from "express";
 import { createServer } from "node:http";
-import { mkdirSync, existsSync } from "node:fs";
+import { mkdirSync, existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
@@ -53,18 +53,38 @@ import { attachTakeoverDrill } from "./takeover-drill.js";
 import { buildContinuityAudit, writeContinuityAudit } from "./continuity-audit.js";
 import { refreshTakeoverAcceptanceAudit } from "./takeover-acceptance-audit.js";
 import { defaultContextQuery, readContextRef, searchContext } from "./grep-context.js";
-import { buildCliAgentCommand, resolveCodexCli, writeCliAgentBootstrap } from "./cli-agent-bootstrap.js";
+import { buildAgentBootstrapKit, buildCliAgentCommand, resolveCodexCli, writeCliAgentBootstrap } from "./cli-agent-bootstrap.js";
+import { addMemory, auditMemoryRetention, buildMemoryHarness, buildMemoryInventory, consolidateMemory, ensureMemoryStore, forgetMemory, inspectMemoryEntityIndex, inspectMemorySearchIndex, inspectMemoryVectorIndex, queryMemoryAudit, readMemory, rebuildMemoryEntityIndex, rebuildMemorySearchIndex, rebuildMemoryVectorIndex, seedDogfoodMemory, searchMemory, supersedeMemory, sweepMemoryRetention, updateMemory } from "./memory-store.js";
+import { buildStateExport, importStateExportBundle } from "./state-transfer.js";
+import { buildProjectLauncher, launchProjectInstance, readProjectLauncherLogs, registerLauncherProject, restartProjectInstance, stopProjectInstance } from "./project-launcher.js";
+import { buildSandboxGuidance } from "./sandbox-guidance.js";
+import { publicAuthBoundary, resolveAuthBoundary, validateAuthRequest } from "./auth-boundary.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(__dirname, "..");
 const defaultProjectDir = path.resolve(appRoot, "demo-project");
 const projectDir = path.resolve(process.env.PROJECT_DIR || defaultProjectDir);
 const port = Number(process.env.PORT || 4147);
+const uiPort = Number(process.env.VITE_PORT || 5174);
+const authBoundary = resolveAuthBoundary({ env: process.env });
+const bindHost = authBoundary.effective.bindHost;
+const serverStartedAt = new Date().toISOString();
 
 mkdirSync(projectDir, { recursive: true });
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "10mb" }));
+app.use((req, res, next) => {
+  if (!req.path.startsWith("/api")) return next();
+  if (req.path === "/api/security/auth") return next();
+  const auth = validateAuthRequest(req, authBoundary);
+  if (auth.ok) return next();
+  res.status(401).json({
+    schemaVersion: "project-agent.auth-error.v1",
+    error: "Authentication required.",
+    auth: publicAuthBoundary(authBoundary)
+  });
+});
 
 const appClients = new Set();
 let autoHandoffSnapshot = null;
@@ -131,6 +151,120 @@ function currentSummary() {
   return summarizeState(readState(projectDir));
 }
 
+function safeCall(fn, fallback = null) {
+  try {
+    return fn();
+  } catch {
+    return fallback;
+  }
+}
+
+function pathHealth(absPath) {
+  const stats = safeCall(() => statSync(absPath), null);
+  return {
+    path: absPath,
+    exists: Boolean(stats),
+    type: stats?.isDirectory() ? "directory" : stats?.isFile() ? "file" : "missing",
+    readable: Boolean(stats)
+  };
+}
+
+function buildHealthSnapshot() {
+  const initialized = existsSync(path.join(projectDir, ".project-agent", "state.json"));
+  const terminalSnapshot = terminal.getSnapshot();
+  const stateManifest = readStateManifest(projectDir);
+  const stateManifestVerification = stateManifest ? verifyStateManifest(projectDir, stateManifest) : null;
+  const memoryInventory = safeCall(() => buildMemoryInventory(projectDir), null);
+  const memorySearchIndex = safeCall(() => inspectMemorySearchIndex(projectDir), null);
+  const memoryEntityIndex = safeCall(() => inspectMemoryEntityIndex(projectDir), null);
+  const memoryVectorIndex = safeCall(() => inspectMemoryVectorIndex(projectDir), null);
+  const sandboxGuidance = safeCall(() => buildSandboxGuidance({ appRoot, projectDir, bindHost, apiPort: port, uiPort, authBoundary: publicAuthBoundary(authBoundary) }), null);
+  const warnings = [
+    terminalSnapshot.backend === "failed" ? "terminal_backend_failed" : "",
+    terminalSnapshot.backend === "pipe" ? "terminal_pipe_mode" : "",
+    initialized && stateManifestVerification && !stateManifestVerification.ok ? "state_manifest_mismatch" : "",
+    memorySearchIndex && ["stale", "invalid"].includes(memorySearchIndex.status) ? "memory_bm25_index" : "",
+    memoryEntityIndex && ["stale", "invalid"].includes(memoryEntityIndex.status) ? "memory_entity_index" : "",
+    memoryVectorIndex && ["stale", "invalid"].includes(memoryVectorIndex.status) ? "memory_vector_index" : "",
+    sandboxGuidance?.status === "blocked" ? "sandbox_boundary_blocked" : ""
+  ].filter(Boolean);
+  return {
+    schemaVersion: "project-agent.health.v1",
+    status: warnings.length ? "watch" : "ok",
+    checkedAt: new Date().toISOString(),
+    server: {
+      startedAt: serverStartedAt,
+      uptimeSeconds: Math.round(process.uptime()),
+      bindHost,
+      port,
+      uiPort,
+      url: `http://${bindHost}:${port}`,
+      uiUrl: `http://${bindHost}:${uiPort}`,
+      node: process.version
+    },
+    project: {
+      name: path.basename(projectDir),
+      projectDir,
+      initialized,
+      root: pathHealth(projectDir),
+      stateDir: pathHealth(path.join(projectDir, ".project-agent"))
+    },
+    terminal: {
+      backend: terminalSnapshot.backend,
+      shell: terminalSnapshot.shell,
+      status: terminalSnapshot.backend === "failed" ? "bad" : terminalSnapshot.backend === "stopped" ? "warn" : "ok",
+      reason: terminalSnapshot.backendReason || ""
+    },
+    state: {
+      manifest: stateManifest
+        ? {
+            status: stateManifestVerification?.status || "unknown",
+            ok: Boolean(stateManifestVerification?.ok),
+            fileCount: stateManifest?.files?.length || stateManifest?.fileCount || 0,
+            checkedAt: stateManifestVerification?.checkedAt || null
+          }
+        : {
+            status: initialized ? "missing" : "not_started",
+            ok: !initialized,
+            fileCount: 0,
+            checkedAt: null
+          }
+    },
+    memory: {
+      status: memoryInventory?.status || "unknown",
+      records: memoryInventory?.totals?.records || 0,
+      canonicalFiles: memoryInventory?.canonicalFiles?.length || 0,
+      bm25: memorySearchIndex ? { status: memorySearchIndex.status, fresh: Boolean(memorySearchIndex.fresh) } : null,
+      entity: memoryEntityIndex ? { status: memoryEntityIndex.status, fresh: Boolean(memoryEntityIndex.fresh) } : null,
+      vector: memoryVectorIndex ? { status: memoryVectorIndex.status, fresh: Boolean(memoryVectorIndex.fresh), engine: memoryVectorIndex.engine } : null
+    },
+    security: {
+      boundary: authBoundary.effective.boundary,
+      localOnly: authBoundary.effective.localOnly,
+      auth: authBoundary.auth.mode,
+      authRequired: authBoundary.auth.required,
+      remoteAccess: authBoundary.effective.remoteAccess,
+      summary: authBoundary.effective.localOnly
+        ? "Server binds to 127.0.0.1 and is intended for trusted local use only."
+        : "Server is in intentional non-local mode and requires bearer-token auth.",
+      authBoundary: publicAuthBoundary(authBoundary),
+      sandbox: sandboxGuidance
+        ? {
+            schemaVersion: sandboxGuidance.schemaVersion,
+            status: sandboxGuidance.status,
+            summary: sandboxGuidance.posture?.summary || "",
+            checks: sandboxGuidance.summary,
+            nextAction: sandboxGuidance.nextAction
+          }
+        : null
+    },
+    warnings,
+    nextAction: warnings.length
+      ? "Review warning details before accepting a handoff or remote launch."
+      : "Local server, project state, terminal backend, and memory surfaces are reachable."
+  };
+}
+
 function resolveReadableGoalId(summary, requestedGoalId) {
   const goals = new Set((summary.goals || []).map((goal) => goal.id));
   if (requestedGoalId && goals.has(requestedGoalId)) return requestedGoalId;
@@ -141,9 +275,136 @@ app.get("/api/config", (req, res) => {
   res.json({
     projectDir,
     projectAgentCli,
+    appRoot,
+    apiPort: port,
+    uiPort,
     initialized: existsSync(path.join(projectDir, ".project-agent", "state.json"))
   });
 });
+
+app.get("/api/health", (req, res) => {
+  res.json(buildHealthSnapshot());
+});
+
+app.get("/api/security/auth", (req, res) => {
+  res.json(publicAuthBoundary(authBoundary));
+});
+
+app.get("/api/security/sandbox", (req, res) => {
+  res.json(buildSandboxGuidance({ appRoot, projectDir, bindHost, apiPort: port, uiPort, authBoundary: publicAuthBoundary(authBoundary) }));
+});
+
+app.get("/api/projects", asyncHandler(async (req, res) => {
+  res.json(await buildProjectLauncher({
+    appRoot,
+    currentProjectDir: projectDir,
+    defaultProjectDir,
+    currentPort: port,
+    currentUiPort: uiPort
+  }));
+}));
+
+app.post("/api/projects/register", (req, res) => {
+  try {
+    const result = registerLauncherProject(projectDir, req.body || {});
+    recordAndNotify({
+      phase: "audit",
+      title: "Launcher project registered",
+      status: "done",
+      detail: result.entry.projectDir,
+      refs: [".project-agent/project-launcher.json"],
+      files: [{ path: ".project-agent/project-launcher.json", status: "modified", kind: "launcher" }]
+    }, { reason: "project-register" });
+    res.json(result);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post("/api/projects/launch", asyncHandler(async (req, res) => {
+  const result = await launchProjectInstance({
+    appRoot,
+    controlProjectDir: projectDir,
+    projectDir: req.body?.projectDir,
+    currentPort: port,
+    currentUiPort: uiPort,
+    apiPort: req.body?.apiPort,
+    uiPort: req.body?.uiPort,
+    dryRun: req.body?.dryRun,
+    execute: req.body?.execute
+  });
+  if (result.launched) {
+    recordAndNotify({
+      phase: "execute",
+      title: "Launcher started project instance",
+      status: "done",
+      detail: result.url,
+      refs: [".project-agent/project-launcher.json"],
+      files: [{ path: result.project.projectDir, status: "launched", kind: "project" }]
+    }, { reason: "project-launch" });
+  }
+  res.json(result);
+}));
+
+app.get("/api/projects/logs", (req, res) => {
+  try {
+    res.json(readProjectLauncherLogs(projectDir, {
+      projectDir: req.query?.projectDir,
+      projectId: req.query?.projectId,
+      limit: req.query?.limit
+    }));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post("/api/projects/stop", asyncHandler(async (req, res) => {
+  const result = await stopProjectInstance({
+    controlProjectDir: projectDir,
+    projectDir: req.body?.projectDir,
+    projectId: req.body?.projectId,
+    dryRun: req.body?.dryRun,
+    execute: req.body?.execute,
+    signal: req.body?.signal
+  });
+  if (result.stopped) {
+    recordAndNotify({
+      phase: "execute",
+      title: "Launcher stopped project instance",
+      status: "done",
+      detail: result.project?.projectDir || result.project?.id,
+      refs: [result.log?.path].filter(Boolean),
+      files: [{ path: result.project?.projectDir || result.project?.id, status: "stopping", kind: "project" }]
+    }, { reason: "project-stop" });
+  }
+  res.json(result);
+}));
+
+app.post("/api/projects/restart", asyncHandler(async (req, res) => {
+  const result = await restartProjectInstance({
+    appRoot,
+    controlProjectDir: projectDir,
+    projectDir: req.body?.projectDir,
+    projectId: req.body?.projectId,
+    currentPort: port,
+    currentUiPort: uiPort,
+    apiPort: req.body?.apiPort,
+    uiPort: req.body?.uiPort,
+    dryRun: req.body?.dryRun,
+    execute: req.body?.execute
+  });
+  if (result.launched) {
+    recordAndNotify({
+      phase: "execute",
+      title: "Launcher restarted project instance",
+      status: "done",
+      detail: result.launch?.url || result.launchPlan?.url,
+      refs: [result.log?.path].filter(Boolean),
+      files: [{ path: result.project?.projectDir, status: "restarted", kind: "project" }]
+    }, { reason: "project-restart" });
+  }
+  res.json(result);
+}));
 
 app.get("/api/state", (req, res) => {
   res.json(currentSummary());
@@ -176,6 +437,317 @@ app.get("/api/memory-graph", (req, res) => {
   res.json({ memoryGraph: readMemoryGraph(projectDir) || null });
 });
 
+app.get("/api/memory/inventory", (req, res) => {
+  res.json(buildMemoryInventory(projectDir));
+});
+
+app.get("/api/memory/search", (req, res) => {
+  res.json(searchMemory(projectDir, {
+    query: req.query.query || req.query.q || "",
+    type: req.query.type || undefined,
+    file: req.query.file || undefined,
+    folder: req.query.folder || undefined,
+    sourceRef: req.query.sourceRef || undefined,
+    concept: req.query.concept || undefined,
+    goalId: req.query.goalId || undefined,
+    fileType: req.query.fileType || undefined,
+    minConfidence: req.query.minConfidence === undefined ? undefined : Number(req.query.minConfidence),
+    sourceQuality: req.query.sourceQuality || undefined,
+    latestOnly: req.query.latestOnly === undefined ? undefined : req.query.latestOnly === "true",
+    useIndex: req.query.useIndex || req.query.index || undefined,
+    limit: Number(req.query.limit || 10)
+  }));
+});
+
+app.get("/api/memory/retention", (req, res) => {
+  try {
+    res.json(auditMemoryRetention(projectDir, {
+      now: req.query.now || undefined,
+      limit: Number(req.query.limit || 50),
+      audit: req.query.audit === "true" || req.query.audit === "1"
+    }));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+function responseWithFreshManifest(result) {
+  const stateManifest = writeStateManifest(projectDir, buildStateManifest(projectDir));
+  return {
+    ...result,
+    refreshScheduled: true,
+    stateManifest: {
+      path: ".project-agent/state-manifest.json",
+      aggregateHash: stateManifest.aggregateHash,
+      fileCount: stateManifest.files?.length || stateManifest.fileCount || 0
+    }
+  };
+}
+
+app.get("/api/memory/index", (req, res) => {
+  res.json(inspectMemorySearchIndex(projectDir));
+});
+
+app.post("/api/memory/index/rebuild", (req, res) => {
+  try {
+    res.json(responseWithFreshManifest(rebuildMemorySearchIndex(projectDir, req.body || {})));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get("/api/memory/entity-index", (req, res) => {
+  res.json(inspectMemoryEntityIndex(projectDir));
+});
+
+app.post("/api/memory/entity-index/rebuild", (req, res) => {
+  try {
+    res.json(responseWithFreshManifest(rebuildMemoryEntityIndex(projectDir, req.body || {})));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get("/api/memory/vector-index", (req, res) => {
+  res.json(inspectMemoryVectorIndex(projectDir));
+});
+
+app.post("/api/memory/vector-index/rebuild", (req, res) => {
+  try {
+    res.json(responseWithFreshManifest(rebuildMemoryVectorIndex(projectDir, req.body || {})));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get("/api/memory/harness", (req, res) => {
+  try {
+    res.json(buildMemoryHarness(projectDir, {
+      query: req.query.query || req.query.q || undefined,
+      goalId: req.query.goalId || undefined,
+      type: req.query.type || undefined,
+      file: req.query.file || undefined,
+      folder: req.query.folder || undefined,
+      sourceRef: req.query.sourceRef || undefined,
+      concept: req.query.concept || undefined,
+      fileType: req.query.fileType || undefined,
+      sourceQuality: req.query.sourceQuality || undefined,
+      latestOnly: req.query.latestOnly === undefined ? undefined : req.query.latestOnly === "true",
+      useIndex: req.query.useIndex || req.query.index || undefined,
+      limit: Number(req.query.limit || 6),
+      maxReads: Number(req.query.maxReads ?? 3),
+      candidateLimit: Number(req.query.candidateLimit || 5),
+      eventLimit: req.query.eventLimit === undefined ? undefined : Number(req.query.eventLimit),
+      retentionLimit: req.query.retentionLimit === undefined ? undefined : Number(req.query.retentionLimit),
+      minConfidence: req.query.minConfidence === undefined ? undefined : Number(req.query.minConfidence),
+      consolidate: req.query.consolidate === undefined ? undefined : req.query.consolidate !== "false",
+      consolidationMode: req.query.consolidationMode || undefined
+    }));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get("/api/memory/consolidate", (req, res) => {
+  try {
+    res.json(consolidateMemory(projectDir, {
+      mode: req.query.mode || "dryRun",
+      dryRun: true,
+      goalId: req.query.goalId || undefined,
+      since: req.query.since || undefined,
+      until: req.query.until || undefined,
+      limit: Number(req.query.limit || 10),
+      eventLimit: req.query.eventLimit === undefined ? undefined : Number(req.query.eventLimit),
+      minConfidence: req.query.minConfidence === undefined ? undefined : Number(req.query.minConfidence)
+    }));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get("/api/memory/audit", (req, res) => {
+  res.json(queryMemoryAudit(projectDir, {
+    action: req.query.action || undefined,
+    mode: req.query.mode || undefined,
+    memoryId: req.query.memoryId || undefined,
+    type: req.query.type || undefined,
+    dryRun: req.query.dryRun === undefined ? undefined : req.query.dryRun === "true" || req.query.dryRun === "1",
+    ref: req.query.ref || undefined,
+    since: req.query.since || undefined,
+    until: req.query.until || undefined,
+    limit: Number(req.query.limit || 20)
+  }));
+});
+
+app.get("/api/memory/read", (req, res) => {
+  try {
+    res.json(readMemory(projectDir, { id: req.query.id, ref: req.query.ref }));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post("/api/memory", (req, res) => {
+  try {
+    const result = addMemory(projectDir, req.body || {});
+    recordAndNotify({
+      phase: "evidence",
+      title: "Canonical memory added",
+      status: "done",
+      detail: result.record.title,
+      refs: [result.ref, ...(result.record.sourceRefs || [])],
+      files: [{ path: result.ref.split("#")[0], status: "modified", kind: "memory" }]
+    }, { reason: "memory-add" });
+    res.json(result);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post("/api/memory/seed-dogfood", (req, res) => {
+  try {
+    const result = seedDogfoodMemory(projectDir, req.body || {});
+    if (!result.dryRun && result.created?.length) {
+      writeStateManifest(projectDir, buildStateManifest(projectDir));
+      recordAndNotify({
+        phase: "audit",
+        title: "Dogfood memory seeded",
+        status: "done",
+        detail: result.summary,
+        refs: [result.auditRef, ...(result.created || []).map((record) => record.ref)].filter(Boolean),
+        files: [{ path: ".project-agent/memory", status: "modified", kind: "memory" }]
+      }, { reason: "memory-dogfood-seed" });
+      autoHandoffSnapshot?.schedule("memory-dogfood-seed");
+    }
+    res.json({
+      ...result,
+      refreshScheduled: !result.dryRun && Boolean(result.created?.length)
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post("/api/memory/update", (req, res) => {
+  try {
+    const result = updateMemory(projectDir, req.body || {});
+    if (!result.dryRun) {
+      writeStateManifest(projectDir, buildStateManifest(projectDir));
+      recordAndNotify({
+        phase: "audit",
+        title: "Canonical memory updated",
+        status: "done",
+        detail: result.summary,
+        refs: [result.auditRef, result.ref].filter(Boolean),
+        files: [{ path: ".project-agent/memory", status: "modified", kind: "memory" }]
+      }, { reason: "memory-update" });
+      autoHandoffSnapshot?.schedule("memory-update");
+    }
+    res.json({
+      ...result,
+      refreshScheduled: !result.dryRun
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post("/api/memory/supersede", (req, res) => {
+  try {
+    const result = supersedeMemory(projectDir, req.body || {});
+    if (!result.dryRun) {
+      writeStateManifest(projectDir, buildStateManifest(projectDir));
+      recordAndNotify({
+        phase: "audit",
+        title: "Canonical memory superseded",
+        status: "done",
+        detail: result.summary,
+        refs: [result.auditRef, result.ref, result.oldRecord?.ref].filter(Boolean),
+        files: [{ path: ".project-agent/memory", status: "modified", kind: "memory" }]
+      }, { reason: "memory-supersede" });
+      autoHandoffSnapshot?.schedule("memory-supersede");
+    }
+    res.json({
+      ...result,
+      refreshScheduled: !result.dryRun
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post("/api/memory/consolidate", (req, res) => {
+  try {
+    const result = consolidateMemory(projectDir, req.body || {});
+    if (!result.dryRun) {
+      writeStateManifest(projectDir, buildStateManifest(projectDir));
+      recordAndNotify({
+        phase: "evidence",
+        title: "Canonical memory consolidated",
+        status: "done",
+        detail: result.summary,
+        refs: [result.auditRef, ...(result.created || []).map((record) => record.ref)].filter(Boolean),
+        files: [{ path: ".project-agent/memory", status: "modified", kind: "memory" }]
+      }, { reason: "memory-consolidate" });
+      autoHandoffSnapshot?.schedule("memory-consolidate");
+    }
+    res.json({
+      ...result,
+      refreshScheduled: !result.dryRun
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post("/api/memory/retention/sweep", (req, res) => {
+  try {
+    const result = sweepMemoryRetention(projectDir, req.body || {});
+    if (!result.dryRun) {
+      writeStateManifest(projectDir, buildStateManifest(projectDir));
+      recordAndNotify({
+        phase: "audit",
+        title: "Memory retention sweep executed",
+        status: "done",
+        detail: result.summary,
+        refs: [result.auditRef, ...(result.refs || [])].filter(Boolean),
+        files: [{ path: ".project-agent/memory", status: "modified", kind: "memory" }]
+      }, { reason: "memory-retention-sweep" });
+      autoHandoffSnapshot?.schedule("memory-retention-sweep");
+    }
+    res.json({
+      ...result,
+      refreshScheduled: !result.dryRun
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post("/api/memory/forget", (req, res) => {
+  try {
+    const result = forgetMemory(projectDir, req.body || {});
+    if (!result.dryRun) {
+      writeStateManifest(projectDir, buildStateManifest(projectDir));
+      recordAndNotify({
+        phase: "audit",
+        title: "Canonical memory forget executed",
+        status: "done",
+        detail: result.summary,
+        refs: [result.auditRef, ...(result.plan?.canonicalRecords || []).map((record) => record.ref)].filter(Boolean),
+        files: [{ path: ".project-agent/memory", status: "modified", kind: "memory" }]
+      }, { reason: "memory-forget" });
+      autoHandoffSnapshot?.schedule("memory-forget");
+    }
+    res.json({
+      ...result,
+      refreshScheduled: !result.dryRun
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
 app.get("/api/governance", (req, res) => {
   const continuity = readContinuity(projectDir) || {};
   const detail = readContinuityDetail(projectDir) || {};
@@ -194,6 +766,38 @@ app.get("/api/state-manifest", (req, res) => {
   }
   const stateManifest = readStateManifest(projectDir) || null;
   res.json({ stateManifest, verification: verifyStateManifest(projectDir, stateManifest) });
+});
+
+app.get("/api/state/export", (req, res) => {
+  const bundle = buildStateExport(projectDir, {
+    mode: req.query.mode || "portable",
+    includeContents: req.query.contents !== "0" && req.query.contents !== "false"
+  });
+  if (req.query.download === "1" || req.query.download === "true") {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    res.setHeader("Content-Disposition", `attachment; filename="project-agent-state-${bundle.mode || "portable"}-${stamp}.json"`);
+  }
+  res.json(bundle);
+});
+
+app.post("/api/state/import", (req, res) => {
+  try {
+    const result = importStateExportBundle(projectDir, req.body || {});
+    if (!result.dryRun && result.status === "ok") {
+      recordAndNotify({
+        phase: "audit",
+        title: "Project state import executed",
+        status: "done",
+        detail: result.summary,
+        refs: [".project-agent/state-manifest.json", ...result.written.slice(0, 8)],
+        files: result.written.slice(0, 12).map((file) => ({ path: file, status: "modified", kind: "state" }))
+      }, { reason: "state-import" });
+      autoHandoffSnapshot?.schedule("state-import");
+    }
+    res.json(result);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error), details: error.details || null });
+  }
 });
 
 app.get("/api/agent-context-bundle", (req, res) => {
@@ -241,7 +845,10 @@ app.get("/api/context-search", (req, res) => {
     query,
     limit: Number(req.query.limit || 10),
     maxFiles: Number(req.query.maxFiles || 500),
-    maxFileBytes: Number(req.query.maxFileBytes || 1024 * 1024)
+    maxFileBytes: Number(req.query.maxFileBytes || 1024 * 1024),
+    file: req.query.file || undefined,
+    folder: req.query.folder || undefined,
+    fileType: req.query.fileType || req.query.ext || undefined
   }));
 });
 
@@ -253,9 +860,20 @@ app.get("/api/cli-agent-bootstrap", (req, res) => {
   });
   res.json({
     ...bootstrap,
+    bootstrapKit: buildAgentBootstrapKit(projectDir, { appRoot, bindHost, apiPort: port, uiPort }),
     command: buildCliAgentCommand(projectDir, { model: req.query.model }),
     codexCli: resolveCodexCli() || null
   });
+});
+
+app.get("/api/agent/bootstrap", (req, res) => {
+  res.json(buildAgentBootstrapKit(projectDir, {
+    appRoot,
+    bindHost,
+    apiPort: port,
+    uiPort,
+    provider: req.query.provider || undefined
+  }));
 });
 
 app.get("/api/agent-context-prompt", (req, res) => {
@@ -540,14 +1158,16 @@ app.post(
   asyncHandler(async (req, res) => {
     const name = req.body?.name || path.basename(projectDir);
     const result = await runProjectAgent(projectDir, ["init", "--name", name]);
+    const memoryStore = ensureMemoryStore(projectDir, { audit: true });
+    const dogfoodSeed = seedDogfoodMemory(projectDir, { agentId: "api_init" });
     recordAndNotify({
       phase: "observe",
       title: "Project initialized",
       status: "done",
       detail: name,
-      refs: ["PROJECT.md", ".project-agent/state.json"]
+      refs: ["PROJECT.md", ".project-agent/state.json", ".project-agent/memory/index.md"]
     });
-    res.json({ output: result.stdout, state: currentSummary() });
+    res.json({ output: result.stdout, state: currentSummary(), memoryStore, dogfoodSeed });
   })
 );
 
@@ -821,6 +1441,12 @@ eventsWss.on("connection", (ws) => {
 
 server.on("upgrade", (request, socket, head) => {
   const pathname = new URL(request.url || "/", "http://127.0.0.1").pathname;
+  const auth = validateAuthRequest(request, authBoundary);
+  if (!auth.ok) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Authentication required.\"}");
+    socket.destroy();
+    return;
+  }
   if (pathname === "/terminal") {
     wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws, request));
     return;
@@ -838,7 +1464,7 @@ startArchitectureWatcher(projectDir, {
   }
 });
 
-server.listen(port, "127.0.0.1", () => {
-  console.log(`Project Agent Terminal server on http://127.0.0.1:${port}`);
+server.listen(port, bindHost, () => {
+  console.log(`Project Agent Terminal server on http://${bindHost}:${port}`);
   console.log(`Project dir: ${projectDir}`);
 });

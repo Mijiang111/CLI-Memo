@@ -197,6 +197,7 @@ function renderPrompt({ continuity }) {
     `- score: ${preEditRisk.score || "0/0"}`,
     `- summary: ${preEditRisk.summary || "No pre-edit risk summary is embedded."}`,
     `- test gap: ${preEditRisk.testGap?.status || "unknown"}`,
+    `- inspection coverage: ${preEditRisk.inspectionCoverage?.status || "unknown"}; missing=${preEditRisk.inspectionCoverage?.missingCount || 0}/${preEditRisk.inspectionCoverage?.requiredCount || 0}`,
     "First checks:",
     listLines((preEditRisk.firstChecks || []).slice(0, 5), (item, index) => `${index + 1}. ${item.action}${item.refs?.length ? `\n   - refs: ${item.refs.slice(0, 4).join(", ")}` : ""}`),
     "",

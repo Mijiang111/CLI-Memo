@@ -15,7 +15,7 @@ function has(flag) {
 }
 
 function positionalQuery() {
-  const skip = new Set(["--project-dir", "--query", "--read", "--limit", "--max-bytes", "--max-files", "--max-file-bytes"]);
+  const skip = new Set(["--project-dir", "--query", "--read", "--limit", "--max-bytes", "--max-files", "--max-file-bytes", "--file", "--folder", "--file-type"]);
   const values = [];
   for (let index = 0; index < args.length; index += 1) {
     const item = args[index];
@@ -40,6 +40,9 @@ Options:
   --read REF               Read a returned ref or JSON selector.
   --limit N                Result count. Defaults to 10.
   --max-bytes N            Max bytes for --read output. Defaults to 12000.
+  --file PATH              Restrict search to refs matching a file fragment.
+  --folder PATH            Restrict search to a project-relative folder.
+  --file-type EXT          Restrict search to an extension such as md, json, js, or jsx.
   --json                   Print raw JSON.
 `;
 }
@@ -65,7 +68,10 @@ try {
     query,
     limit: Number(valueAfter("--limit", 10)),
     maxFiles: Number(valueAfter("--max-files", 500)),
-    maxFileBytes: Number(valueAfter("--max-file-bytes", 1024 * 1024))
+    maxFileBytes: Number(valueAfter("--max-file-bytes", 1024 * 1024)),
+    file: valueAfter("--file"),
+    folder: valueAfter("--folder"),
+    fileType: valueAfter("--file-type")
   });
 
   if (has("--json")) {
@@ -75,6 +81,7 @@ try {
 
   console.log(`Grep context: ${JSON.stringify(result.query)}`);
   console.log(`mode=${result.mode} llmCalls=${result.budget.llmCalls} files=${result.budget.scannedFiles} bytes=${result.budget.scannedBytes}`);
+  if (Object.keys(result.filters || {}).length) console.log(`filters=${JSON.stringify(result.filters)}`);
   for (const item of result.results) {
     console.log(`\n${item.rank}. ${item.ref} score=${item.score}`);
     console.log(item.snippet);

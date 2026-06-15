@@ -1,14 +1,39 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocket } from "ws";
+import { publicAuthBoundary, resolveAuthBoundary, validateAuthRequest } from "./auth-boundary.js";
+import { launchProjectInstance, readProjectLauncherLogs, stopProjectInstance } from "./project-launcher.js";
 
 const port = Number(process.env.PORT || (4200 + Math.floor(Math.random() * 1000)));
 const base = `http://127.0.0.1:${port}`;
 const ownsProjectDir = !process.env.PROJECT_DIR;
 const projectDir = process.env.PROJECT_DIR || mkdtempSync(path.join(os.tmpdir(), "project-agent-terminal-smoke-"));
 const gitSmokeInitialized = ownsProjectDir && spawnSync("git", ["init"], { cwd: projectDir, encoding: "utf8" }).status === 0;
+
+const authSmokeToken = "smoke-auth-token-123456";
+const localAuthBoundary = resolveAuthBoundary({ env: {} });
+if (localAuthBoundary.effective.bindHost !== "127.0.0.1" || localAuthBoundary.auth.required !== false || localAuthBoundary.auth.mode !== "not_enabled") {
+  throw new Error(`local auth boundary should default to local/no-auth: ${JSON.stringify(publicAuthBoundary(localAuthBoundary))}`);
+}
+const blockedRemoteBoundary = resolveAuthBoundary({ env: { PROJECT_AGENT_BIND_HOST: "0.0.0.0" } });
+if (blockedRemoteBoundary.status !== "blocked" || blockedRemoteBoundary.effective.bindHost !== "127.0.0.1" || blockedRemoteBoundary.effective.remoteAccess !== "blocked_by_auth_guard") {
+  throw new Error(`remote bind without opt-in/token should stay local and blocked: ${JSON.stringify(publicAuthBoundary(blockedRemoteBoundary))}`);
+}
+const readyRemoteBoundary = resolveAuthBoundary({ env: { PROJECT_AGENT_BIND_HOST: "0.0.0.0", PROJECT_AGENT_REMOTE: "1", PROJECT_AGENT_AUTH_TOKEN: authSmokeToken } });
+if (readyRemoteBoundary.status !== "watch" || readyRemoteBoundary.effective.bindHost !== "0.0.0.0" || readyRemoteBoundary.auth.required !== true || readyRemoteBoundary.auth.mode !== "bearer_token") {
+  throw new Error(`remote auth boundary should enable token auth: ${JSON.stringify(publicAuthBoundary(readyRemoteBoundary))}`);
+}
+if (!validateAuthRequest({ headers: { authorization: `Bearer ${authSmokeToken}` }, url: "/api/health" }, readyRemoteBoundary).ok || validateAuthRequest({ headers: {}, url: "/api/health" }, readyRemoteBoundary).ok) {
+  throw new Error("auth request validator did not accept bearer token and reject missing token");
+}
+if (JSON.stringify(publicAuthBoundary(readyRemoteBoundary)).includes(authSmokeToken) || JSON.stringify(readyRemoteBoundary).includes(authSmokeToken)) {
+  throw new Error("auth boundary leaked raw token through JSON serialization");
+}
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -24,6 +49,63 @@ async function waitForServer() {
   }
   throw new Error("server did not start");
 }
+
+async function waitForUrl(url) {
+  for (let i = 0; i < 50; i++) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return;
+    } catch {}
+    await wait(100);
+  }
+  throw new Error(`server did not start for ${url}`);
+}
+
+async function remoteAuthServerSmoke() {
+  const remotePort = port + 1000;
+  const remoteProjectDir = mkdtempSync(path.join(os.tmpdir(), "project-agent-terminal-remote-auth-"));
+  const remoteBase = `http://127.0.0.1:${remotePort}`;
+  const remoteChild = spawn("node", ["server/index.js"], {
+    env: {
+      ...process.env,
+      PROJECT_DIR: remoteProjectDir,
+      PORT: String(remotePort),
+      PROJECT_AGENT_BIND_HOST: "0.0.0.0",
+      PROJECT_AGENT_REMOTE: "1",
+      PROJECT_AGENT_AUTH_TOKEN: authSmokeToken
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  remoteChild.stderr.on("data", (chunk) => process.stderr.write(chunk));
+  try {
+    await waitForUrl(`${remoteBase}/api/security/auth`);
+    const authStatus = await fetch(`${remoteBase}/api/security/auth`).then((res) => res.json());
+    if (authStatus.effective?.bindHost !== "0.0.0.0" || authStatus.auth?.required !== true || authStatus.auth?.mode !== "bearer_token" || JSON.stringify(authStatus).includes(authSmokeToken)) {
+      throw new Error(`remote auth status did not expose safe bearer-token readiness: ${JSON.stringify(authStatus)}`);
+    }
+    const unauthenticated = await fetch(`${remoteBase}/api/health`);
+    if (unauthenticated.status !== 401) {
+      throw new Error(`remote health should require auth, got ${unauthenticated.status}: ${await unauthenticated.text()}`);
+    }
+    const authenticated = await fetch(`${remoteBase}/api/health`, {
+      headers: { Authorization: `Bearer ${authSmokeToken}` }
+    });
+    if (!authenticated.ok) throw new Error(`remote health bearer token failed ${authenticated.status}: ${await authenticated.text()}`);
+    const health = await authenticated.json();
+    if (health.server?.bindHost !== "0.0.0.0" || health.security?.authRequired !== true || health.security?.auth !== "bearer_token" || health.security?.remoteAccess !== "enabled_with_bearer_token") {
+      throw new Error(`remote authenticated health missing auth boundary: ${JSON.stringify(health.security)}`);
+    }
+  } finally {
+    remoteChild.kill();
+    await Promise.race([
+      new Promise((resolve) => remoteChild.once("close", resolve)),
+      wait(1000)
+    ]);
+    rmSync(remoteProjectDir, { recursive: true, force: true });
+  }
+}
+
+await remoteAuthServerSmoke();
 
 async function post(path, body = {}) {
   const res = await fetch(`${base}${path}`, {
@@ -125,11 +207,709 @@ function runtimeEventSocketSmoke() {
   });
 }
 
+function mcpPayload(result) {
+  if (result.structuredContent) return result.structuredContent;
+  const text = result.content?.find((item) => item.type === "text")?.text || "{}";
+  return JSON.parse(text);
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function mcpCall(projectDir, name, args = {}) {
+  const transport = new StdioClientTransport({
+    command: "node",
+    args: ["server/project-mcp.js", "--project-dir", projectDir],
+    cwd: process.cwd(),
+    stderr: "pipe"
+  });
+  let stderr = "";
+  transport.stderr?.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+  const client = new Client({ name: "project-agent-terminal-smoke-call", version: "0.1.0" });
+  try {
+    await client.connect(transport);
+    return mcpPayload(await client.callTool({ name, arguments: args }));
+  } catch (error) {
+    throw new Error(`${error.message || String(error)}${stderr ? `\nMCP call stderr:\n${stderr}` : ""}`);
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+async function mcpSmoke(goalId) {
+  const transport = new StdioClientTransport({
+    command: "node",
+    args: ["server/project-mcp.js", "--project-dir", projectDir],
+    cwd: process.cwd(),
+    stderr: "pipe"
+  });
+  let stderr = "";
+  transport.stderr?.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+  const client = new Client({ name: "project-agent-terminal-smoke", version: "0.1.0" });
+
+  try {
+    await client.connect(transport);
+    const toolList = await client.listTools();
+    const toolNames = new Set((toolList.tools || []).map((tool) => tool.name));
+    for (const name of [
+      "project_start",
+      "project_takeover_summary",
+      "project_context_search",
+      "project_read_ref",
+      "project_record_event",
+      "project_architecture_changes",
+      "project_handoff_audit",
+      "project_memory_inventory",
+      "project_memory_seed_dogfood",
+      "project_memory_add",
+      "project_memory_read",
+      "project_memory_update",
+      "project_memory_supersede",
+      "project_memory_search",
+      "project_memory_rebuild_index",
+      "project_memory_rebuild_entity_index",
+      "project_memory_rebuild_vector_index",
+      "project_memory_forget",
+      "project_memory_retention_audit",
+      "project_memory_retention_sweep",
+      "project_memory_harness",
+      "project_memory_consolidate",
+      "project_memory_audit"
+    ]) {
+      if (!toolNames.has(name)) throw new Error(`MCP tool missing: ${name}`);
+    }
+
+    const summary = mcpPayload(await client.callTool({ name: "project_takeover_summary", arguments: {} }));
+    if (summary.takeoverSummary?.schemaVersion !== "project-agent.takeover-summary.v1" || !summary.verification?.canResume) {
+      throw new Error(`MCP takeover summary failed: ${JSON.stringify(summary)}`);
+    }
+
+    const search = mcpPayload(await client.callTool({
+      name: "project_context_search",
+      arguments: { query: "Smoke test Project Agent Terminal", limit: 5 }
+    }));
+    if (search.mode !== "grep-first" || !search.results?.length) {
+      throw new Error(`MCP context search failed: ${JSON.stringify(search)}`);
+    }
+    const scopedContextSearch = mcpPayload(await client.callTool({
+      name: "project_context_search",
+      arguments: { query: "project-agent", folder: ".project-agent", fileType: "json", limit: 5 }
+    }));
+    if (scopedContextSearch.filters?.folder !== ".project-agent" || scopedContextSearch.filters?.fileType !== "json" || !scopedContextSearch.results?.length || !scopedContextSearch.results.every((item) => item.file.startsWith(".project-agent/") && item.file.endsWith(".json"))) {
+      throw new Error(`MCP context search filters failed: ${JSON.stringify(scopedContextSearch)}`);
+    }
+
+    const read = mcpPayload(await client.callTool({
+      name: "project_read_ref",
+      arguments: { ref: ".project-agent/takeover-summary.json#schemaVersion", maxBytes: 2000 }
+    }));
+    if (read.value !== "project-agent.takeover-summary.v1") {
+      throw new Error(`MCP read ref failed: ${JSON.stringify(read)}`);
+    }
+
+    const architecture = mcpPayload(await client.callTool({
+      name: "project_architecture_changes",
+      arguments: { limit: 5, persist: false }
+    }));
+    if (!architecture.totals?.files || !Array.isArray(architecture.recentChanges)) {
+      throw new Error(`MCP architecture changes failed: ${JSON.stringify(architecture)}`);
+    }
+
+    const audit = mcpPayload(await client.callTool({ name: "project_handoff_audit", arguments: {} }));
+    if (!audit.verification?.canResume || !audit.manifest?.status) {
+      throw new Error(`MCP handoff audit failed: ${JSON.stringify(audit)}`);
+    }
+
+    const event = mcpPayload(await client.callTool({
+      name: "project_record_event",
+      arguments: {
+        phase: "plan",
+        status: "done",
+        title: "MCP smoke event",
+        detail: "MCP server can record project process events",
+        refs: ["mcp-smoke"],
+        goalId,
+        agentId: "mcp-smoke"
+      }
+    }));
+    if (!event.ok || event.accepted < 1) {
+      throw new Error(`MCP record event failed: ${JSON.stringify(event)}`);
+    }
+
+    const decisionEvent = mcpPayload(await client.callTool({
+      name: "project_record_event",
+      arguments: {
+        phase: "plan",
+        status: "done",
+        title: "Decision: Consolidation smoke keeps runtime decisions durable",
+        detail: "Decision: project_memory_consolidate should promote this runtime decision into canonical memory. CONSO_DECISION_SMOKE",
+        refs: ["mcp-consolidate-decision"],
+        goalId,
+        agentId: "mcp-smoke"
+      }
+    }));
+    const procedureEvent = mcpPayload(await client.callTool({
+      name: "project_record_event",
+      arguments: {
+        phase: "execute",
+        status: "done",
+        title: "Procedure: Run consolidation smoke workflow",
+        detail: "Procedure: run project_memory_consolidate after runtime evidence to create durable memory. CONSO_PROCEDURE_SMOKE",
+        refs: ["mcp-consolidate-procedure"],
+        goalId,
+        agentId: "mcp-smoke"
+      }
+    }));
+    if (!decisionEvent.ok || !procedureEvent.ok) {
+      throw new Error(`MCP consolidation seed events failed: ${JSON.stringify({ decisionEvent, procedureEvent })}`);
+    }
+
+    mkdirSync(path.join(projectDir, "docs", "research"), { recursive: true });
+    writeFileSync(
+      path.join(projectDir, "docs", "research", "memory-gap-deep-benchmark.md"),
+      "# Memory Gap Deep Benchmark\n\nP0 lifecycle requires dogfood seed, update, supersede, and retention audit/sweep. DOGFOOD_SEED_SMOKE\n",
+      "utf8"
+    );
+
+    const inventory = mcpPayload(await client.callTool({ name: "project_memory_inventory", arguments: {} }));
+    if (!["ok", "warn"].includes(inventory.status) || !inventory.canonical?.exists || !inventory.files?.some((file) => file.ref === ".project-agent/memory/facts.jsonl" && file.class === "source")) {
+      throw new Error(`MCP memory inventory failed: ${JSON.stringify(inventory)}`);
+    }
+    if (inventory.lifecycle?.dogfood?.status !== "empty" || !inventory.lifecycle?.tools?.includes("project_memory_update") || !inventory.lifecycle?.tools?.includes("project_memory_retention_sweep")) {
+      throw new Error(`MCP memory inventory missing lifecycle P0 status/tools: ${JSON.stringify(inventory.lifecycle)}`);
+    }
+
+    const dogfoodSeed = mcpPayload(await client.callTool({
+      name: "project_memory_seed_dogfood",
+      arguments: { dryRun: false, goalId, agentId: "mcp-smoke" }
+    }));
+    if (!dogfoodSeed.created?.length || dogfoodSeed.plan?.status !== "seeded" || !dogfoodSeed.auditRef || !dogfoodSeed.refreshed) {
+      throw new Error(`MCP dogfood seed failed: ${JSON.stringify(dogfoodSeed)}`);
+    }
+
+    const dogfoodSearch = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: { query: "grep-first canonical memory source truth", concept: "dogfood-seed", limit: 5 }
+    }));
+    if (!dogfoodSearch.results?.some((item) => item.id === "mem_dogfood_grep_first_source_truth")) {
+      throw new Error(`MCP dogfood seed should be searchable: ${JSON.stringify(dogfoodSearch)}`);
+    }
+
+    const dogfoodIdempotent = mcpPayload(await client.callTool({
+      name: "project_memory_seed_dogfood",
+      arguments: { dryRun: false, goalId, agentId: "mcp-smoke" }
+    }));
+    if (dogfoodIdempotent.created?.length || dogfoodIdempotent.status !== "seeded") {
+      throw new Error(`MCP dogfood seed should be idempotent: ${JSON.stringify(dogfoodIdempotent)}`);
+    }
+
+    const consolidationPreview = mcpPayload(await client.callTool({
+      name: "project_memory_consolidate",
+      arguments: { mode: "goal", goalId, dryRun: true, limit: 10 }
+    }));
+    if (consolidationPreview.status !== "dry_run" || !consolidationPreview.candidates?.some((item) => item.content?.includes("CONSO_DECISION_SMOKE") && item.status === "ready") || !consolidationPreview.candidates?.some((item) => item.content?.includes("CONSO_PROCEDURE_SMOKE") && item.status === "ready")) {
+      throw new Error(`MCP memory consolidate preview failed: ${JSON.stringify(consolidationPreview)}`);
+    }
+
+    const consolidationExecution = mcpPayload(await client.callTool({
+      name: "project_memory_consolidate",
+      arguments: { mode: "goal", goalId, dryRun: false, limit: 10 }
+    }));
+    if (consolidationExecution.dryRun || consolidationExecution.created?.length < 2 || !consolidationExecution.auditRef || !consolidationExecution.refreshed) {
+      throw new Error(`MCP memory consolidate execution failed: ${JSON.stringify(consolidationExecution)}`);
+    }
+
+    const consolidationDecisionSearch = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: { query: "CONSO_DECISION_SMOKE", limit: 5 }
+    }));
+    if (!consolidationDecisionSearch.results?.some((item) => item.type === "decision" && item.snippet.includes("CONSO_DECISION_SMOKE"))) {
+      throw new Error(`MCP consolidated decision is not searchable: ${JSON.stringify(consolidationDecisionSearch)}`);
+    }
+
+    const consolidationProcedureSearch = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: { query: "CONSO_PROCEDURE_SMOKE", limit: 5 }
+    }));
+    if (!consolidationProcedureSearch.results?.some((item) => item.type === "procedure" && item.snippet.includes("CONSO_PROCEDURE_SMOKE"))) {
+      throw new Error(`MCP consolidated procedure is not searchable: ${JSON.stringify(consolidationProcedureSearch)}`);
+    }
+
+    const memoryHarness = mcpPayload(await client.callTool({
+      name: "project_memory_harness",
+      arguments: { query: "CONSO_DECISION_SMOKE CONSO_PROCEDURE_SMOKE", limit: 6, maxReads: 3, candidateLimit: 5 }
+    }));
+    if (memoryHarness.schemaVersion !== "project-agent.memory-harness.v1" || !memoryHarness.automatic || !memoryHarness.appliedCalls?.some((call) => call.tool === "project_memory_search") || !memoryHarness.appliedCalls?.some((call) => call.tool === "project_memory_read") || !memoryHarness.autoReads?.some((item) => item.snippet.includes("CONSO_DECISION_SMOKE"))) {
+      throw new Error(`MCP memory harness did not auto route search/read: ${JSON.stringify(memoryHarness)}`);
+    }
+
+    const takeoverWithHarness = mcpPayload(await client.callTool({
+      name: "project_takeover_summary",
+      arguments: { refresh: false }
+    }));
+    if (takeoverWithHarness.memoryHarness?.schemaVersion !== "project-agent.memory-harness.v1" || !takeoverWithHarness.memoryHarness?.appliedCalls?.some((call) => call.tool === "project_memory_search")) {
+      throw new Error(`MCP takeover summary should include automatic memory harness: ${JSON.stringify(takeoverWithHarness.memoryHarness)}`);
+    }
+
+    const consolidationAudit = mcpPayload(await client.callTool({
+      name: "project_memory_audit",
+      arguments: { action: "memory_consolidated", ref: consolidationExecution.created[0]?.ref, limit: 5 }
+    }));
+    if (!consolidationAudit.entries?.some((item) => item.action === "memory_consolidated" && item.created?.some((created) => created.ref === consolidationExecution.created[0]?.ref))) {
+      throw new Error(`MCP memory audit did not capture consolidation: ${JSON.stringify(consolidationAudit)}`);
+    }
+
+    const consolidationIdempotent = mcpPayload(await client.callTool({
+      name: "project_memory_consolidate",
+      arguments: { mode: "manual", candidateIds: [consolidationExecution.created[0].candidateId], dryRun: false, limit: 10 }
+    }));
+    if (consolidationIdempotent.created?.length || !consolidationIdempotent.skipped?.some((item) => item.status === "duplicate")) {
+      throw new Error(`MCP memory consolidate should be idempotent for existing candidates: ${JSON.stringify(consolidationIdempotent)}`);
+    }
+
+    const addedMemory = mcpPayload(await client.callTool({
+      name: "project_memory_add",
+      arguments: {
+        type: "procedure",
+        title: "Run API tests with local Redis",
+        content: "API tests require local Redis before running the integration suite.",
+        sourceRefs: [".project-agent/runtime.json#events[0]"],
+        files: ["docs/quality/test-strategy.md"],
+        concepts: ["testing", "redis", "memory"],
+        goalId,
+        importance: 8,
+        confidence: 0.9
+      }
+    }));
+    if (!addedMemory.ok || !addedMemory.ref?.startsWith(".project-agent/memory/procedures.jsonl#")) {
+      throw new Error(`MCP memory add failed: ${JSON.stringify(addedMemory)}`);
+    }
+
+    const addedAudit = mcpPayload(await client.callTool({
+      name: "project_memory_audit",
+      arguments: { action: "memory_added", memoryId: addedMemory.record.id, limit: 5 }
+    }));
+    if (!["ok", "warn"].includes(addedAudit.status) || !addedAudit.entries?.some((item) => item.memoryId === addedMemory.record.id && item.refs?.includes(addedMemory.ref))) {
+      throw new Error(`MCP memory audit did not capture add: ${JSON.stringify(addedAudit)}`);
+    }
+
+    const readMemory = mcpPayload(await client.callTool({
+      name: "project_memory_read",
+      arguments: { ref: addedMemory.ref }
+    }));
+    if (readMemory.record?.title !== "Run API tests with local Redis" || !readMemory.sourceRefs?.length) {
+      throw new Error(`MCP memory read failed: ${JSON.stringify(readMemory)}`);
+    }
+
+    const searchMemory = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: { query: "Redis integration suite", limit: 5 }
+    }));
+    if (searchMemory.mode !== "grep-first-canonical-memory" || !searchMemory.results?.some((item) => item.id === addedMemory.record.id && item.refs?.includes(addedMemory.ref))) {
+      throw new Error(`MCP memory search failed: ${JSON.stringify(searchMemory)}`);
+    }
+    const filteredMemorySearch = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: {
+        query: "Redis integration suite",
+        type: "procedure",
+        folder: "docs/quality",
+        fileType: "md",
+        concept: "testing",
+        sourceQuality: "strong",
+        minConfidence: 0.8,
+        limit: 5
+      }
+    }));
+    const filteredHit = filteredMemorySearch.results?.find((item) => item.id === addedMemory.record.id);
+    if (!filteredHit || filteredMemorySearch.filters?.folder !== "docs/quality" || filteredMemorySearch.filters?.fileType !== "md" || filteredHit.sourceQuality?.status !== "strong" || filteredHit.scoreBreakdown?.filterMatch < 10 || filteredMemorySearch.ranking?.deterministic !== true) {
+      throw new Error(`MCP memory search filters/ranking failed: ${JSON.stringify(filteredMemorySearch)}`);
+    }
+
+    const rebuiltIndex = mcpPayload(await client.callTool({
+      name: "project_memory_rebuild_index",
+      arguments: {}
+    }));
+    if (rebuiltIndex.schemaVersion !== "project-agent.memory-search-index-rebuild.v1" || rebuiltIndex.index?.status !== "fresh" || rebuiltIndex.index?.sourceRecords < 1 || !rebuiltIndex.auditRef) {
+      throw new Error(`MCP memory index rebuild failed: ${JSON.stringify(rebuiltIndex)}`);
+    }
+
+    const indexedMemorySearch = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: { query: "Redis integration suite", useIndex: "bm25", limit: 5 }
+    }));
+    const indexedHit = indexedMemorySearch.results?.find((item) => item.id === addedMemory.record.id);
+    if (!indexedHit || indexedMemorySearch.ranking?.optionalIndexes?.bm25?.used !== true || !indexedHit.scoreBreakdown?.bm25) {
+      throw new Error(`MCP memory BM25 indexed search failed: ${JSON.stringify(indexedMemorySearch)}`);
+    }
+
+    const rebuiltEntityIndex = mcpPayload(await client.callTool({
+      name: "project_memory_rebuild_entity_index",
+      arguments: {}
+    }));
+    if (rebuiltEntityIndex.schemaVersion !== "project-agent.memory-entity-index-rebuild.v1" || rebuiltEntityIndex.index?.status !== "fresh" || rebuiltEntityIndex.index?.statistics?.entityCount < 1 || !rebuiltEntityIndex.auditRef) {
+      throw new Error(`MCP memory entity index rebuild failed: ${JSON.stringify(rebuiltEntityIndex)}`);
+    }
+
+    const entityMemorySearch = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: { query: "Redis integration suite", useIndex: "entity", folder: "docs/quality", concept: "redis", limit: 5 }
+    }));
+    const entityHit = entityMemorySearch.results?.find((item) => item.id === addedMemory.record.id);
+    if (!entityHit || entityMemorySearch.ranking?.optionalIndexes?.entity?.used !== true || !entityHit.scoreBreakdown?.entity || !entityMemorySearch.ranking?.optionalIndexes?.entity?.matched?.length) {
+      throw new Error(`MCP memory entity indexed search failed: ${JSON.stringify(entityMemorySearch)}`);
+    }
+
+    const rebuiltVectorIndex = mcpPayload(await client.callTool({
+      name: "project_memory_rebuild_vector_index",
+      arguments: {}
+    }));
+    if (rebuiltVectorIndex.schemaVersion !== "project-agent.memory-vector-index-rebuild.v1" || rebuiltVectorIndex.index?.status !== "fresh" || rebuiltVectorIndex.index?.statistics?.dimensions < 1 || rebuiltVectorIndex.index?.embeddingProvider !== "none" || !rebuiltVectorIndex.auditRef) {
+      throw new Error(`MCP memory vector index rebuild failed: ${JSON.stringify(rebuiltVectorIndex)}`);
+    }
+
+    const vectorMemorySearch = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: { query: "Redis integration suite", useIndex: "vector", limit: 5 }
+    }));
+    const vectorHit = vectorMemorySearch.results?.find((item) => item.id === addedMemory.record.id);
+    if (!vectorHit || vectorMemorySearch.ranking?.optionalIndexes?.vector?.used !== true || vectorMemorySearch.ranking?.optionalIndexes?.vector?.embeddingProvider !== "none" || !vectorHit.scoreBreakdown?.vector) {
+      throw new Error(`MCP memory vector indexed search failed: ${JSON.stringify(vectorMemorySearch)}`);
+    }
+
+    const indexedHarness = mcpPayload(await client.callTool({
+      name: "project_memory_harness",
+      arguments: {
+        query: "Redis integration suite",
+        folder: "docs/quality",
+        fileType: "md",
+        concept: "redis",
+        limit: 5,
+        maxReads: 1,
+        consolidate: false
+      }
+    }));
+    if (indexedHarness.search?.optionalIndexes?.bm25?.used !== true || indexedHarness.search?.optionalIndexes?.entity?.used !== true || indexedHarness.search?.optionalIndexes?.vector?.used !== true || indexedHarness.appliedCalls?.[0]?.arguments?.useIndex !== "hybrid" || !indexedHarness.autoReads?.some((item) => item.ref === addedMemory.ref)) {
+      throw new Error(`MCP memory harness should auto-use fresh hybrid indexes: ${JSON.stringify(indexedHarness)}`);
+    }
+
+    const updatedMemory = mcpPayload(await client.callTool({
+      name: "project_memory_update",
+      arguments: {
+        ref: addedMemory.ref,
+        reason: "MCP smoke lifecycle update",
+        title: "Run API tests with local Redis and lifecycle caches",
+        content: "API tests require local Redis before running the integration suite. UPDATE_LIFECYCLE_SMOKE",
+        concepts: ["testing", "redis", "memory", "lifecycle"],
+        confidence: 0.91
+      }
+    }));
+    if (updatedMemory.schemaVersion !== "project-agent.memory-update.v1" || updatedMemory.dryRun || updatedMemory.record?.version !== Number(addedMemory.record.version || 1) + 1 || !updatedMemory.changedFields?.includes("content") || !updatedMemory.refreshed) {
+      throw new Error(`MCP memory update failed: ${JSON.stringify(updatedMemory)}`);
+    }
+
+    const updatedIndexedSearch = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: { query: "UPDATE_LIFECYCLE_SMOKE", useIndex: "hybrid", limit: 5 }
+    }));
+    if (!updatedIndexedSearch.results?.some((item) => item.id === addedMemory.record.id && item.snippet.includes("UPDATE_LIFECYCLE_SMOKE")) || updatedIndexedSearch.ranking?.optionalIndexes?.bm25?.used !== true || updatedIndexedSearch.ranking?.optionalIndexes?.entity?.used !== true || updatedIndexedSearch.ranking?.optionalIndexes?.vector?.used !== true) {
+      throw new Error(`MCP updated memory should refresh indexes and stay searchable: ${JSON.stringify(updatedIndexedSearch)}`);
+    }
+
+    const updateAudit = mcpPayload(await client.callTool({
+      name: "project_memory_audit",
+      arguments: { action: "memory_updated", memoryId: addedMemory.record.id, limit: 5 }
+    }));
+    if (!updateAudit.entries?.some((item) => item.action === "memory_updated" && item.memoryId === addedMemory.record.id)) {
+      throw new Error(`MCP memory audit did not capture update: ${JSON.stringify(updateAudit)}`);
+    }
+
+    const supersedeOld = mcpPayload(await client.callTool({
+      name: "project_memory_add",
+      arguments: {
+        type: "fact",
+        title: "Supersede old smoke fact",
+        content: "SUPERSEDE_OLD_SMOKE will be replaced by a newer canonical fact.",
+        sourceRefs: [".project-agent/runtime.json#events[0]"],
+        concepts: ["supersede-smoke"],
+        goalId,
+        confidence: 0.88,
+        importance: 7
+      }
+    }));
+    const supersedeDryRun = mcpPayload(await client.callTool({
+      name: "project_memory_supersede",
+      arguments: {
+        ref: supersedeOld.ref,
+        dryRun: true,
+        reason: "MCP smoke supersede preview",
+        content: "SUPERSEDE_NEW_SMOKE replaces the old smoke fact.",
+        sourceRefs: [".project-agent/runtime.json#events[0]"],
+        concepts: ["supersede-smoke", "lifecycle"]
+      }
+    }));
+    if (!supersedeDryRun.dryRun || supersedeDryRun.plan?.old?.id !== supersedeOld.record.id || !supersedeDryRun.plan?.replacement?.supersedes?.includes(supersedeOld.record.id)) {
+      throw new Error(`MCP memory supersede dry-run failed: ${JSON.stringify(supersedeDryRun)}`);
+    }
+    const superseded = mcpPayload(await client.callTool({
+      name: "project_memory_supersede",
+      arguments: {
+        ref: supersedeOld.ref,
+        dryRun: false,
+        reason: "MCP smoke supersede execution",
+        content: "SUPERSEDE_NEW_SMOKE replaces the old smoke fact.",
+        sourceRefs: [".project-agent/runtime.json#events[0]"],
+        concepts: ["supersede-smoke", "lifecycle"]
+      }
+    }));
+    if (superseded.dryRun || superseded.oldRecord?.isLatest !== false || superseded.oldRecord?.supersededBy !== superseded.record?.id || !superseded.record?.supersedes?.includes(supersedeOld.record.id) || !superseded.refreshed) {
+      throw new Error(`MCP memory supersede execution failed: ${JSON.stringify(superseded)}`);
+    }
+    const supersedeSearch = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: { query: "SUPERSEDE_NEW_SMOKE", latestOnly: true, limit: 5 }
+    }));
+    if (!supersedeSearch.results?.some((item) => item.id === superseded.record.id) || supersedeSearch.results?.some((item) => item.id === supersedeOld.record.id)) {
+      throw new Error(`MCP superseded memory latest search failed: ${JSON.stringify(supersedeSearch)}`);
+    }
+
+    const expiredMemory = mcpPayload(await client.callTool({
+      name: "project_memory_add",
+      arguments: {
+        type: "episode",
+        title: "Retention expired smoke episode",
+        content: "RETENTION_EXPIRED_SMOKE should be expired by retention sweep.",
+        sourceRefs: [".project-agent/runtime.json#events[0]"],
+        concepts: ["retention-smoke"],
+        goalId,
+        validUntil: "2000-01-01T00:00:00.000Z",
+        confidence: 0.8,
+        importance: 4
+      }
+    }));
+    const retentionAudit = mcpPayload(await client.callTool({
+      name: "project_memory_retention_audit",
+      arguments: { limit: 50 }
+    }));
+    if (retentionAudit.schemaVersion !== "project-agent.memory-retention-audit.v1" || !retentionAudit.candidates?.some((item) => item.id === expiredMemory.record.id && item.action === "expire" && item.eligible)) {
+      throw new Error(`MCP memory retention audit failed: ${JSON.stringify(retentionAudit)}`);
+    }
+    const retentionDryRun = mcpPayload(await client.callTool({
+      name: "project_memory_retention_sweep",
+      arguments: { dryRun: true, limit: 50, reason: "MCP smoke retention dry-run" }
+    }));
+    if (!retentionDryRun.dryRun || !retentionDryRun.auditRef || !retentionDryRun.audit?.candidates?.some((item) => item.id === expiredMemory.record.id)) {
+      throw new Error(`MCP memory retention sweep dry-run failed: ${JSON.stringify(retentionDryRun)}`);
+    }
+    const retentionSweep = mcpPayload(await client.callTool({
+      name: "project_memory_retention_sweep",
+      arguments: { dryRun: false, limit: 50, reason: "MCP smoke retention sweep" }
+    }));
+    if (retentionSweep.dryRun || !retentionSweep.mutations?.some((item) => item.expired >= 1) || !retentionSweep.refreshed) {
+      throw new Error(`MCP memory retention sweep execution failed: ${JSON.stringify(retentionSweep)}`);
+    }
+    const expiredRead = mcpPayload(await client.callTool({
+      name: "project_memory_read",
+      arguments: { ref: expiredMemory.ref }
+    }));
+    if (expiredRead.record?.isLatest !== false || expiredRead.record?.retention?.status !== "expired") {
+      throw new Error(`MCP retention sweep did not mark record expired: ${JSON.stringify(expiredRead)}`);
+    }
+
+    const dryRunForget = mcpPayload(await client.callTool({
+      name: "project_memory_forget",
+      arguments: { ref: addedMemory.ref, mode: "delete", dryRun: true, reason: "MCP smoke dry-run" }
+    }));
+    if (!dryRunForget.dryRun || dryRunForget.plan?.canonicalRecords?.length !== 1 || !dryRunForget.auditRef) {
+      throw new Error(`MCP memory forget dry-run failed: ${JSON.stringify(dryRunForget)}`);
+    }
+
+    const dryRunAudit = mcpPayload(await client.callTool({
+      name: "project_memory_audit",
+      arguments: { action: "memory_forget_dry_run", dryRun: true, ref: addedMemory.ref, limit: 5 }
+    }));
+    if (!dryRunAudit.entries?.some((item) => item.action === "memory_forget_dry_run" && item.dryRun === true && item.refs?.includes(addedMemory.ref))) {
+      throw new Error(`MCP memory audit did not capture forget dry-run: ${JSON.stringify(dryRunAudit)}`);
+    }
+
+    const stillSearchable = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: { query: "Redis integration suite", limit: 5 }
+    }));
+    if (!stillSearchable.results?.some((item) => item.id === addedMemory.record.id)) {
+      throw new Error(`MCP dry-run forget mutated canonical memory: ${JSON.stringify(stillSearchable)}`);
+    }
+
+    const executedForget = mcpPayload(await client.callTool({
+      name: "project_memory_forget",
+      arguments: { ref: addedMemory.ref, mode: "delete", dryRun: false, reason: "MCP smoke delete" }
+    }));
+    if (executedForget.dryRun || executedForget.postCheck?.remainingMatches !== 0 || !executedForget.refreshed) {
+      throw new Error(`MCP memory forget execution failed: ${JSON.stringify(executedForget)}`);
+    }
+
+    const executedAudit = mcpPayload(await client.callTool({
+      name: "project_memory_audit",
+      arguments: { action: "memory_forget_executed", mode: "delete", ref: addedMemory.ref, limit: 5 }
+    }));
+    if (!executedAudit.entries?.some((item) => item.action === "memory_forget_executed" && item.mode === "delete" && item.refs?.includes(addedMemory.ref))) {
+      throw new Error(`MCP memory audit did not capture forget execution: ${JSON.stringify(executedAudit)}`);
+    }
+
+    const deletedSearch = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: { query: "Redis integration suite", limit: 5 }
+    }));
+    if (deletedSearch.results?.some((item) => item.id === addedMemory.record.id)) {
+      throw new Error(`MCP deleted memory still appears in search: ${JSON.stringify(deletedSearch)}`);
+    }
+
+    const redactMemory = mcpPayload(await client.callTool({
+      name: "project_memory_add",
+      arguments: {
+        type: "fact",
+        title: "Redaction smoke fact",
+        content: "NEVER_FIND_ME_SMOKE should be removed by redaction.",
+        sourceRefs: [".project-agent/runtime.json#events[0]"],
+        concepts: ["redaction-smoke"],
+        goalId
+      }
+    }));
+    const redacted = mcpPayload(await client.callTool({
+      name: "project_memory_forget",
+      arguments: {
+        ref: redactMemory.ref,
+        mode: "redact",
+        dryRun: false,
+        replacement: "[redacted smoke content]",
+        reason: "MCP smoke redact"
+      }
+    }));
+    if (redacted.postCheck?.remainingMatches !== 1 || !redacted.refreshed) {
+      throw new Error(`MCP memory redact failed: ${JSON.stringify(redacted)}`);
+    }
+    const redactedAudit = mcpPayload(await client.callTool({
+      name: "project_memory_audit",
+      arguments: { action: "memory_forget_executed", mode: "redact", ref: redactMemory.ref, limit: 5 }
+    }));
+    if (!redactedAudit.entries?.some((item) => item.action === "memory_forget_executed" && item.mode === "redact" && item.mutations?.length)) {
+      throw new Error(`MCP memory audit did not capture redact execution: ${JSON.stringify(redactedAudit)}`);
+    }
+    const redactedSearch = mcpPayload(await client.callTool({
+      name: "project_memory_search",
+      arguments: { query: "NEVER_FIND_ME_SMOKE", limit: 5 }
+    }));
+    if (redactedSearch.results?.some((item) => item.id === redactMemory.record.id)) {
+      throw new Error(`MCP redacted memory content still appears in search: ${JSON.stringify(redactedSearch)}`);
+    }
+  } catch (error) {
+    throw new Error(`${error.message || String(error)}${stderr ? `\nMCP stderr:\n${stderr}` : ""}`);
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+async function mcpColdStartSmoke() {
+  const coldProjectDir = mkdtempSync(path.join(os.tmpdir(), "project-agent-terminal-mcp-cold-"));
+  const transport = new StdioClientTransport({
+    command: "node",
+    args: ["server/project-mcp.js", "--project-dir", coldProjectDir],
+    cwd: process.cwd(),
+    stderr: "pipe"
+  });
+  let stderr = "";
+  transport.stderr?.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+  const client = new Client({ name: "project-agent-terminal-cold-start-smoke", version: "0.1.0" });
+
+  try {
+    await client.connect(transport);
+    const toolList = await client.listTools();
+    if (!toolList.tools?.some((tool) => tool.name === "project_start")) {
+      throw new Error(`MCP project_start tool missing: ${JSON.stringify(toolList)}`);
+    }
+
+    const inventoryBefore = mcpPayload(await client.callTool({ name: "project_memory_inventory", arguments: {} }));
+    if (inventoryBefore.status !== "not_started" || !inventoryBefore.nextStep?.tool) {
+      throw new Error(`MCP pre-start memory inventory should be not_started: ${JSON.stringify(inventoryBefore)}`);
+    }
+
+    const memoryAuditBefore = mcpPayload(await client.callTool({ name: "project_memory_audit", arguments: {} }));
+    if (memoryAuditBefore.status !== "not_started" || memoryAuditBefore.entries?.length) {
+      throw new Error(`MCP pre-start memory audit should be not_started: ${JSON.stringify(memoryAuditBefore)}`);
+    }
+
+    const memoryConsolidateBefore = mcpPayload(await client.callTool({ name: "project_memory_consolidate", arguments: {} }));
+    if (memoryConsolidateBefore.status !== "not_started" || memoryConsolidateBefore.candidates?.length) {
+      throw new Error(`MCP pre-start memory consolidate should be not_started: ${JSON.stringify(memoryConsolidateBefore)}`);
+    }
+
+    const memoryHarnessBefore = mcpPayload(await client.callTool({ name: "project_memory_harness", arguments: {} }));
+    if (memoryHarnessBefore.status !== "not_started" || memoryHarnessBefore.autoReads?.length) {
+      throw new Error(`MCP pre-start memory harness should be not_started: ${JSON.stringify(memoryHarnessBefore)}`);
+    }
+
+    const before = mcpPayload(await client.callTool({ name: "project_takeover_summary", arguments: {} }));
+    if (before.lifecycle?.status !== "not_started" || before.takeoverSummary?.defaultReadOrder?.length || before.takeoverSummary?.nextStep?.command !== "project_start") {
+      throw new Error(`MCP pre-start summary should be explicit not_started: ${JSON.stringify(before)}`);
+    }
+
+    const auditBefore = mcpPayload(await client.callTool({ name: "project_handoff_audit", arguments: {} }));
+    if (auditBefore.lifecycle !== "not_started" || auditBefore.status !== "not_started" || !auditBefore.blockers?.includes("project_not_started")) {
+      throw new Error(`MCP pre-start audit should not look like broken handoff: ${JSON.stringify(auditBefore)}`);
+    }
+
+    const readBefore = mcpPayload(await client.callTool({
+      name: "project_read_ref",
+      arguments: { ref: ".project-agent/takeover-packet.json" }
+    }));
+    if (readBefore.lifecycle !== "not_started" || readBefore.status !== "not_started" || !readBefore.nextStep?.tool) {
+      throw new Error(`MCP pre-start ref read should point to project_start: ${JSON.stringify(readBefore)}`);
+    }
+
+    const started = mcpPayload(await client.callTool({
+      name: "project_start",
+      arguments: {
+        objective: "Cold start MCP project",
+        acceptance: ["MCP can initialize project state"]
+      }
+    }));
+    if (started.lifecycle?.status !== "active" || !started.goal || !existsSync(path.join(coldProjectDir, ".project-agent", "takeover-packet.json")) || !existsSync(path.join(coldProjectDir, ".project-agent", "process-trace.json")) || !existsSync(path.join(coldProjectDir, ".project-agent", "architecture-map.json")) || !existsSync(path.join(coldProjectDir, ".project-agent", "memory", "facts.jsonl"))) {
+      throw new Error(`MCP project_start did not create a coherent handoff package: ${JSON.stringify(started)}`);
+    }
+
+    const memoryAuditAfterStart = mcpPayload(await client.callTool({ name: "project_memory_audit", arguments: { limit: 5 } }));
+    if (!["ok", "warn"].includes(memoryAuditAfterStart.status) || !memoryAuditAfterStart.entries?.some((item) => item.action === "store_initialized")) {
+      throw new Error(`MCP post-start memory audit should include store initialization: ${JSON.stringify(memoryAuditAfterStart)}`);
+    }
+
+    const after = mcpPayload(await client.callTool({ name: "project_takeover_summary", arguments: {} }));
+    if (after.lifecycle?.status !== "active" || after.takeoverSummary?.defaultReadOrder?.[0] !== ".project-agent/takeover-summary.json") {
+      throw new Error(`MCP post-start summary should be active with readable refs: ${JSON.stringify(after)}`);
+    }
+  } catch (error) {
+    throw new Error(`${error.message || String(error)}${stderr ? `\nMCP cold-start stderr:\n${stderr}` : ""}`);
+  } finally {
+    await client.close().catch(() => {});
+    rmSync(coldProjectDir, { recursive: true, force: true });
+  }
+}
+
 const child = spawn("node", ["server/index.js"], {
   env: {
     ...process.env,
     PROJECT_DIR: projectDir,
-    PORT: String(port)
+    PORT: String(port),
+    PROJECT_AGENT_BIND_HOST: "127.0.0.1",
+    PROJECT_AGENT_REMOTE: "0",
+    PROJECT_AGENT_ALLOW_REMOTE: "0",
+    PROJECT_AGENT_AUTH_TOKEN: ""
   },
   stdio: ["ignore", "pipe", "pipe"]
 });
@@ -138,13 +918,116 @@ child.stderr.on("data", (chunk) => process.stderr.write(chunk));
 try {
   await waitForServer();
   const config = await get("/api/config");
-  if (!config.projectDir) throw new Error("missing projectDir");
+  if (!config.projectDir || config.apiPort !== port || !config.uiPort) throw new Error(`missing project config fields: ${JSON.stringify(config)}`);
+  const health = await get("/api/health");
+  if (health.schemaVersion !== "project-agent.health.v1" || !["ok", "watch"].includes(health.status) || health.server?.bindHost !== "127.0.0.1" || health.server?.port !== port || !health.server?.uiPort || health.security?.boundary !== "local_only" || health.security?.remoteAccess !== "disabled_by_bind_host" || health.security?.auth !== "not_enabled" || health.security?.authRequired !== false || !health.project?.projectDir || !health.terminal?.backend || !health.memory || !health.state?.manifest) {
+    throw new Error(`health endpoint missing productization readiness fields: ${JSON.stringify(health)}`);
+  }
+  const authEndpoint = await get("/api/security/auth");
+  if (authEndpoint.schemaVersion !== "project-agent.auth-boundary.v1" || authEndpoint.effective?.localOnly !== true || authEndpoint.auth?.required !== false || authEndpoint.auth?.valuesExposed !== false || authEndpoint.requested?.tokenFingerprint !== null || JSON.stringify(authEndpoint).includes("PROJECT_AGENT_AUTH_TOKEN")) {
+    throw new Error(`auth endpoint missing safe local defaults: ${JSON.stringify(authEndpoint)}`);
+  }
+  if (!health.security?.authBoundary || health.security.authBoundary.schemaVersion !== authEndpoint.schemaVersion || health.security.authBoundary.auth?.required !== false) {
+    throw new Error(`health endpoint missing auth boundary summary: ${JSON.stringify(health.security?.authBoundary)}`);
+  }
+  const sandboxGuidance = await get("/api/security/sandbox");
+  if (sandboxGuidance.schemaVersion !== "project-agent.sandbox-guidance.v1" || !["ok", "watch"].includes(sandboxGuidance.status) || sandboxGuidance.posture?.localOnly !== true || sandboxGuidance.posture?.auth !== "not_enabled" || sandboxGuidance.posture?.apiPort !== port || sandboxGuidance.auth?.schemaVersion !== "project-agent.auth-boundary.v1" || sandboxGuidance.auth?.auth?.required !== false || sandboxGuidance.secrets?.rawEnvReturned !== false || sandboxGuidance.secrets?.sensitiveEnv?.valuesExposed !== false) {
+    throw new Error(`sandbox guidance endpoint missing local permission posture: ${JSON.stringify(sandboxGuidance)}`);
+  }
+  if (!sandboxGuidance.policy?.allowedAutomations?.includes("project_takeover_summary_memory_harness") || !sandboxGuidance.policy?.allowedAutomations?.includes("project_launcher_status_and_logs") || !sandboxGuidance.policy?.requiresConfirmation?.includes("state_import_execute_overwrite") || !sandboxGuidance.policy?.requiresConfirmation?.includes("launcher_execute_stop_or_restart_process") || !sandboxGuidance.policy?.blockedByDefault?.includes("remote_bind_without_auth")) {
+    throw new Error(`sandbox guidance missing automation/confirmation/block policy: ${JSON.stringify(sandboxGuidance.policy)}`);
+  }
+  if (!sandboxGuidance.permissions?.writeScopes?.some((scope) => scope.id === "state_import" && scope.gate === "dry_run_plus_overwrite_confirmation") || !sandboxGuidance.permissions?.writeScopes?.some((scope) => scope.id === "launcher_logs" && scope.gate === "launch_stop_restart_lifecycle") || !sandboxGuidance.permissions?.executionScopes?.some((scope) => scope.id === "launcher" && scope.gate === "launch_plan_then_execute") || !sandboxGuidance.checks?.some((item) => item.id === "memory_harness" && item.status === "ok")) {
+    throw new Error(`sandbox guidance missing concrete permission scopes: ${JSON.stringify(sandboxGuidance.permissions)}`);
+  }
+  if (!health.security?.sandbox || health.security.sandbox.schemaVersion !== sandboxGuidance.schemaVersion || !health.security.sandbox.checks) {
+    throw new Error(`health endpoint missing sandbox guidance summary: ${JSON.stringify(health.security?.sandbox)}`);
+  }
   await post("/api/init", { name: "smoke" });
   const created = await post("/api/goals", {
     objective: "Smoke test Project Agent Terminal",
     acceptance: ["Kernel endpoint works"]
   });
   const goalId = created.goal.id;
+  const projectsEndpoint = await get("/api/projects");
+  if (projectsEndpoint.schemaVersion !== "project-agent.project-launcher.v1" || projectsEndpoint.boundary?.localOnly !== true || projectsEndpoint.current?.apiPort !== port || !projectsEndpoint.projects?.some((project) => project.current && project.projectDir === projectDir)) {
+    throw new Error(`project launcher endpoint missing current project: ${JSON.stringify(projectsEndpoint)}`);
+  }
+  const launcherTargetDir = path.join(projectDir, "launcher-target");
+  const registeredProject = await post("/api/projects/register", {
+    projectDir: launcherTargetDir,
+    name: "launcher-target",
+    create: true
+  });
+  if (!registeredProject.ok || registeredProject.project?.projectDir !== launcherTargetDir || !existsSync(launcherTargetDir)) {
+    throw new Error(`project launcher register failed: ${JSON.stringify(registeredProject)}`);
+  }
+  const projectsAfterRegister = await get("/api/projects");
+  if (!projectsAfterRegister.projects?.some((project) => project.projectDir === launcherTargetDir && project.source === "registered")) {
+    throw new Error(`registered project missing from launcher list: ${JSON.stringify(projectsAfterRegister)}`);
+  }
+  const launchPlan = await post("/api/projects/launch", {
+    projectDir: launcherTargetDir,
+    dryRun: true
+  });
+  if (launchPlan.schemaVersion !== "project-agent.project-launch-plan.v1" || launchPlan.dryRun !== true || launchPlan.launched !== false || launchPlan.apiPort === port || launchPlan.uiPort === config.uiPort || !launchPlan.command?.includes("PROJECT_DIR=") || !launchPlan.command?.includes("VITE_API_PORT=") || !launchPlan.command?.includes("VITE_PORT=") || launchPlan.bindHost !== "127.0.0.1" || !launchPlan.url?.startsWith("http://127.0.0.1:")) {
+    throw new Error(`project launch plan failed: ${JSON.stringify(launchPlan)}`);
+  }
+  const emptyLauncherLogs = await get(`/api/projects/logs?projectDir=${encodeURIComponent(launcherTargetDir)}&limit=5`);
+  if (emptyLauncherLogs.schemaVersion !== "project-agent.project-launcher-logs.v1" || emptyLauncherLogs.log?.path !== `.project-agent/launcher-logs/${launchPlan.project.id}.jsonl` || !Array.isArray(emptyLauncherLogs.entries)) {
+    throw new Error(`project launcher logs endpoint missing persisted log contract: ${JSON.stringify(emptyLauncherLogs)}`);
+  }
+  const stopDryRun = await post("/api/projects/stop", {
+    projectDir: launcherTargetDir,
+    dryRun: true
+  });
+  if (stopDryRun.schemaVersion !== "project-agent.project-launch-control.v1" || stopDryRun.action !== "stop" || stopDryRun.status !== "not_running" || stopDryRun.stopped !== false || stopDryRun.log?.path !== `.project-agent/launcher-logs/${launchPlan.project.id}.jsonl`) {
+    throw new Error(`project launcher stop dry-run failed: ${JSON.stringify(stopDryRun)}`);
+  }
+  const restartDryRun = await post("/api/projects/restart", {
+    projectDir: launcherTargetDir,
+    dryRun: true
+  });
+  if (restartDryRun.schemaVersion !== "project-agent.project-launch-control.v1" || restartDryRun.action !== "restart" || restartDryRun.status !== "would_start" || restartDryRun.launched !== false || restartDryRun.launchPlan?.schemaVersion !== "project-agent.project-launch-plan.v1") {
+    throw new Error(`project launcher restart dry-run failed: ${JSON.stringify(restartDryRun)}`);
+  }
+  const launcherLifecycleDir = path.join(projectDir, "launcher-lifecycle");
+  mkdirSync(launcherLifecycleDir, { recursive: true });
+  const lifecycleLaunch = await launchProjectInstance({
+    appRoot: process.cwd(),
+    controlProjectDir: projectDir,
+    projectDir: launcherLifecycleDir,
+    currentPort: port,
+    currentUiPort: config.uiPort,
+    apiPort: port + 41,
+    uiPort: config.uiPort + 41,
+    dryRun: false,
+    execute: true,
+    command: process.execPath,
+    args: ["-e", "console.log('launcher-lifecycle-ready'); setTimeout(() => process.exit(0), 10000);"]
+  });
+  if (lifecycleLaunch.schemaVersion !== "project-agent.project-launch-plan.v1" || lifecycleLaunch.launched !== true || !lifecycleLaunch.log?.path?.includes(".project-agent/launcher-logs/")) {
+    throw new Error(`project launcher lifecycle launch failed: ${JSON.stringify(lifecycleLaunch)}`);
+  }
+  await wait(500);
+  const lifecycleLogs = readProjectLauncherLogs(projectDir, { projectDir: launcherLifecycleDir, limit: 20 });
+  if (lifecycleLogs.schemaVersion !== "project-agent.project-launcher-logs.v1" || lifecycleLogs.status !== "ok" || !lifecycleLogs.entries.some((entry) => entry.event === "start") || !lifecycleLogs.entries.some((entry) => entry.stream === "stdout" && entry.text.includes("launcher-lifecycle-ready"))) {
+    throw new Error(`project launcher lifecycle logs missing start/stdout entries: ${JSON.stringify(lifecycleLogs)}`);
+  }
+  const lifecycleStop = await stopProjectInstance({
+    controlProjectDir: projectDir,
+    projectDir: launcherLifecycleDir,
+    dryRun: false,
+    execute: true
+  });
+  if (lifecycleStop.schemaVersion !== "project-agent.project-launch-control.v1" || lifecycleStop.action !== "stop" || lifecycleStop.stopped !== true || lifecycleStop.status !== "stopping") {
+    throw new Error(`project launcher lifecycle stop failed: ${JSON.stringify(lifecycleStop)}`);
+  }
+  await wait(500);
+  const lifecycleLogsAfterStop = readProjectLauncherLogs(projectDir, { projectDir: launcherLifecycleDir, limit: 30 });
+  if (!lifecycleLogsAfterStop.entries.some((entry) => entry.event === "stop_requested")) {
+    throw new Error(`project launcher lifecycle logs missing stop entry: ${JSON.stringify(lifecycleLogsAfterStop)}`);
+  }
   const packet = await get(`/api/kernel?role=coding_agent&goal=${goalId}`);
   if (packet.goalId !== goalId) throw new Error("kernel did not bind goal");
   const initialInsights = await get(`/api/insights?role=coding_agent&goal=${goalId}`);
@@ -302,6 +1185,57 @@ try {
   if (manifestCliJson.verification?.schemaVersion !== "project-agent.state-manifest-verification.v1" || !manifestCliJson.verification?.ok) {
     throw new Error(`state manifest cli missing ok verification: ${manifestCli.stdout}`);
   }
+  const stateExportEndpoint = await get("/api/state/export?mode=portable");
+  if (
+    stateExportEndpoint.schemaVersion !== "project-agent.state-export.v1" ||
+    stateExportEndpoint.status !== "ok" ||
+    stateExportEndpoint.mode !== "portable" ||
+    !stateExportEndpoint.digest ||
+    !stateExportEndpoint.files?.some((file) => file.path === ".project-agent/state.json" && file.class === "source" && file.content) ||
+    !stateExportEndpoint.files?.some((file) => file.path === ".project-agent/takeover-summary.json" && file.class === "derived") ||
+    stateExportEndpoint.files?.some((file) => file.path === ".project-agent/runtime.json")
+  ) {
+    throw new Error(`state export endpoint missing portable bundle: ${JSON.stringify({ ...stateExportEndpoint, files: stateExportEndpoint.files?.slice(0, 4) })}`);
+  }
+  const stateImportDryRun = await post("/api/state/import", { bundle: stateExportEndpoint, dryRun: true });
+  if (stateImportDryRun.schemaVersion !== "project-agent.state-import-plan.v1" || stateImportDryRun.status !== "dry_run" || stateImportDryRun.totals?.rejected || stateImportDryRun.totals?.identical < stateExportEndpoint.files.length) {
+    throw new Error(`state import dry-run endpoint failed: ${JSON.stringify(stateImportDryRun)}`);
+  }
+  const transferSmokeContent = `${JSON.stringify({
+    schemaVersion: "project-agent.state-transfer-smoke.v1",
+    marker: "STATE_TRANSFER_SMOKE",
+    goalId
+  }, null, 2)}\n`;
+  const transferSmokeBundle = {
+    schemaVersion: "project-agent.state-export.v1",
+    status: "ok",
+    mode: "full",
+    generatedAt: new Date().toISOString(),
+    digest: "state-transfer-smoke",
+    files: [
+      {
+        path: ".project-agent/state-transfer-smoke.json",
+        class: "unknown",
+        bytes: Buffer.byteLength(transferSmokeContent, "utf8"),
+        sha256: sha256(transferSmokeContent),
+        schemaVersion: "project-agent.state-transfer-smoke.v1",
+        encoding: "utf8",
+        content: transferSmokeContent
+      }
+    ]
+  };
+  const transferSmokePreview = await post("/api/state/import", { bundle: transferSmokeBundle, dryRun: true });
+  if (transferSmokePreview.status !== "dry_run" || transferSmokePreview.totals?.create !== 1 || transferSmokePreview.totals?.rejected) {
+    throw new Error(`state import create preview failed: ${JSON.stringify(transferSmokePreview)}`);
+  }
+  const transferSmokeExecution = await post("/api/state/import", { bundle: transferSmokeBundle, dryRun: false, overwrite: true });
+  if (transferSmokeExecution.status !== "ok" || !transferSmokeExecution.written?.includes(".project-agent/state-transfer-smoke.json") || !transferSmokeExecution.stateManifest?.ok) {
+    throw new Error(`state import execution failed: ${JSON.stringify(transferSmokeExecution)}`);
+  }
+  const transferSmokeFile = JSON.parse(readFileSync(path.join(projectDir, ".project-agent", "state-transfer-smoke.json"), "utf8"));
+  if (transferSmokeFile.marker !== "STATE_TRANSFER_SMOKE" || transferSmokeFile.goalId !== goalId) {
+    throw new Error(`state import did not write expected smoke file: ${JSON.stringify(transferSmokeFile)}`);
+  }
   const contextBundleEndpoint = await get("/api/agent-context-bundle?write=1");
   if (contextBundleEndpoint.agentContextBundle?.schemaVersion !== "project-agent.context-bundle.v1" || !contextBundleEndpoint.agentContextBundle?.contentHash || contextBundleEndpoint.agentContextBundle?.readOrder?.[0] !== ".project-agent/takeover-summary.json" || !contextBundleEndpoint.agentContextBundle?.memory?.budget || !contextBundleEndpoint.agentContextBundle?.process?.budget || !contextBundleEndpoint.agentContextBundle?.architecture?.budget || !contextBundleEndpoint.agentContextBundle?.handoff?.budget || !contextBundleEndpoint.agentContextBundle?.process?.trace?.current || !contextBundleEndpoint.agentContextBundle?.validation?.stateManifestVerification?.ok || contextBundleEndpoint.agentContextBundle?.validation?.disclosureGate?.schemaVersion !== "project-agent.disclosure-gate.v1" || contextBundleEndpoint.agentContextBundle?.validation?.attentionPack?.schemaVersion !== "project-agent.attention-pack.v1" || !contextBundleEndpoint.agentContextBundle?.validation?.attentionPack?.items?.length || contextBundleEndpoint.takeoverSummary?.schemaVersion !== "project-agent.takeover-summary.v1" || !contextBundleEndpoint.takeoverSummary?.onDemandReads?.length) {
     throw new Error(`agent context bundle endpoint missing takeover context: ${JSON.stringify(contextBundleEndpoint.agentContextBundle)}`);
@@ -342,6 +1276,196 @@ try {
   }
   if (!contextCliJson.verification?.checks?.some((check) => check.id === "prompt_packing_gate")) {
     throw new Error(`agent context cli missing prompt packing gate: ${contextCli.stdout}`);
+  }
+  await mcpColdStartSmoke();
+  await mcpSmoke(goalId);
+  const rebuiltMemoryIndexEndpoint = await post("/api/memory/index/rebuild", {});
+  if (rebuiltMemoryIndexEndpoint.schemaVersion !== "project-agent.memory-search-index-rebuild.v1" || rebuiltMemoryIndexEndpoint.index?.status !== "fresh" || rebuiltMemoryIndexEndpoint.index?.sourceRecords < 1) {
+    throw new Error(`memory index rebuild endpoint failed: ${JSON.stringify(rebuiltMemoryIndexEndpoint)}`);
+  }
+  const memoryIndexEndpoint = await get("/api/memory/index");
+  if (memoryIndexEndpoint.status !== "fresh" || memoryIndexEndpoint.engine !== "bm25-lite" || !memoryIndexEndpoint.statistics?.documentCount) {
+    throw new Error(`memory index status endpoint failed: ${JSON.stringify(memoryIndexEndpoint)}`);
+  }
+  const indexedMemoryEndpoint = await get("/api/memory/search?query=CONSO_DECISION_SMOKE&useIndex=bm25&limit=5");
+  if (indexedMemoryEndpoint.ranking?.optionalIndexes?.bm25?.used !== true || !indexedMemoryEndpoint.results?.some((item) => item.snippet.includes("CONSO_DECISION_SMOKE") && item.scoreBreakdown?.bm25)) {
+    throw new Error(`memory indexed search endpoint failed: ${JSON.stringify(indexedMemoryEndpoint)}`);
+  }
+  const rebuiltMemoryEntityIndexEndpoint = await post("/api/memory/entity-index/rebuild", {});
+  if (rebuiltMemoryEntityIndexEndpoint.schemaVersion !== "project-agent.memory-entity-index-rebuild.v1" || rebuiltMemoryEntityIndexEndpoint.index?.status !== "fresh" || rebuiltMemoryEntityIndexEndpoint.index?.statistics?.entityCount < 1) {
+    throw new Error(`memory entity index rebuild endpoint failed: ${JSON.stringify(rebuiltMemoryEntityIndexEndpoint)}`);
+  }
+  const memoryEntityIndexEndpoint = await get("/api/memory/entity-index");
+  if (memoryEntityIndexEndpoint.status !== "fresh" || memoryEntityIndexEndpoint.engine !== "entity-graph-lite" || !memoryEntityIndexEndpoint.statistics?.entityCount) {
+    throw new Error(`memory entity index status endpoint failed: ${JSON.stringify(memoryEntityIndexEndpoint)}`);
+  }
+  const rebuiltMemoryVectorIndexEndpoint = await post("/api/memory/vector-index/rebuild", {});
+  if (rebuiltMemoryVectorIndexEndpoint.schemaVersion !== "project-agent.memory-vector-index-rebuild.v1" || rebuiltMemoryVectorIndexEndpoint.index?.status !== "fresh" || rebuiltMemoryVectorIndexEndpoint.index?.statistics?.dimensions < 1 || rebuiltMemoryVectorIndexEndpoint.index?.embeddingProvider !== "none") {
+    throw new Error(`memory vector index rebuild endpoint failed: ${JSON.stringify(rebuiltMemoryVectorIndexEndpoint)}`);
+  }
+  const memoryVectorIndexEndpoint = await get("/api/memory/vector-index");
+  if (memoryVectorIndexEndpoint.status !== "fresh" || memoryVectorIndexEndpoint.engine !== "lexical-vector-lite" || !memoryVectorIndexEndpoint.statistics?.dimensions || memoryVectorIndexEndpoint.embeddingProvider !== "none") {
+    throw new Error(`memory vector index status endpoint failed: ${JSON.stringify(memoryVectorIndexEndpoint)}`);
+  }
+  const vectorMemoryEndpoint = await get("/api/memory/search?query=CONSO_DECISION_SMOKE&useIndex=vector&limit=5");
+  if (vectorMemoryEndpoint.ranking?.optionalIndexes?.vector?.used !== true || vectorMemoryEndpoint.ranking?.optionalIndexes?.vector?.embeddingProvider !== "none" || !vectorMemoryEndpoint.results?.some((item) => item.snippet.includes("CONSO_DECISION_SMOKE") && item.scoreBreakdown?.vector)) {
+    throw new Error(`memory vector search endpoint failed: ${JSON.stringify(vectorMemoryEndpoint)}`);
+  }
+  const entityMemoryEndpoint = await get("/api/memory/search?query=CONSO_DECISION_SMOKE&useIndex=hybrid&limit=5");
+  if (entityMemoryEndpoint.ranking?.optionalIndexes?.bm25?.used !== true || entityMemoryEndpoint.ranking?.optionalIndexes?.entity?.used !== true || entityMemoryEndpoint.ranking?.optionalIndexes?.vector?.used !== true || !entityMemoryEndpoint.results?.some((item) => item.snippet.includes("CONSO_DECISION_SMOKE") && item.scoreBreakdown?.entity && item.scoreBreakdown?.vector)) {
+    throw new Error(`memory hybrid entity search endpoint failed: ${JSON.stringify(entityMemoryEndpoint)}`);
+  }
+  const contextSearchEndpoint = await get("/api/context-search?query=project-agent&folder=.project-agent&fileType=json&limit=5");
+  if (contextSearchEndpoint.filters?.folder !== ".project-agent" || contextSearchEndpoint.filters?.fileType !== "json" || !contextSearchEndpoint.results?.length || !contextSearchEndpoint.results.every((item) => item.file.startsWith(".project-agent/") && item.file.endsWith(".json"))) {
+    throw new Error(`context search endpoint filters failed: ${JSON.stringify(contextSearchEndpoint)}`);
+  }
+  const memorySearchEndpoint = await get("/api/memory/search?query=CONSO_DECISION_SMOKE&type=decision&sourceQuality=strong&minConfidence=0.8&limit=5");
+  if (memorySearchEndpoint.filters?.type !== "decision" || memorySearchEndpoint.filters?.sourceQuality !== "strong" || memorySearchEndpoint.ranking?.deterministic !== true || !memorySearchEndpoint.results?.some((item) => item.type === "decision" && item.snippet.includes("CONSO_DECISION_SMOKE") && item.sourceQuality?.status === "strong")) {
+    throw new Error(`memory search endpoint filters/ranking failed: ${JSON.stringify(memorySearchEndpoint)}`);
+  }
+  await post("/api/events", {
+    phase: "execute",
+    status: "done",
+    title: "Procedure: HTTP consolidation UI confirmation",
+    detail: "Procedure: HTTP_CONSOLIDATE_UI_CONFIRM should become durable memory through the confirmed HTTP consolidation path.",
+    refs: ["http-consolidate-ui-confirm"],
+    goalId,
+    agentId: "http-smoke"
+  });
+  const memoryConsolidateEndpoint = await get("/api/memory/consolidate?mode=session&limit=10");
+  if (memoryConsolidateEndpoint.schemaVersion !== "project-agent.memory-consolidation.v1" || memoryConsolidateEndpoint.status !== "dry_run" || !Array.isArray(memoryConsolidateEndpoint.candidates) || memoryConsolidateEndpoint.totals?.candidates === undefined) {
+    throw new Error(`memory consolidate endpoint missing dry-run proposals: ${JSON.stringify(memoryConsolidateEndpoint)}`);
+  }
+  const httpReadyCandidate = memoryConsolidateEndpoint.candidates?.find((candidate) => candidate.content?.includes("HTTP_CONSOLIDATE_UI_CONFIRM") && candidate.status === "ready");
+  if (!httpReadyCandidate) {
+    throw new Error(`memory consolidate endpoint did not expose ready HTTP confirmation candidate: ${JSON.stringify(memoryConsolidateEndpoint)}`);
+  }
+  const memoryConsolidateExecutionEndpoint = await post("/api/memory/consolidate", {
+    mode: "manual",
+    dryRun: false,
+    candidateIds: [httpReadyCandidate.id],
+    limit: 10
+  });
+  if (memoryConsolidateExecutionEndpoint.dryRun || memoryConsolidateExecutionEndpoint.status !== "ok" || !memoryConsolidateExecutionEndpoint.created?.some((item) => item.title.includes("HTTP consolidation UI confirmation")) || !memoryConsolidateExecutionEndpoint.refreshScheduled) {
+    throw new Error(`memory consolidate execution endpoint failed: ${JSON.stringify(memoryConsolidateExecutionEndpoint)}`);
+  }
+  const memoryConsolidateExecutionSearch = await get("/api/memory/search?query=HTTP_CONSOLIDATE_UI_CONFIRM&limit=5");
+  if (!memoryConsolidateExecutionSearch.results?.some((item) => item.snippet.includes("HTTP_CONSOLIDATE_UI_CONFIRM"))) {
+    throw new Error(`memory consolidate execution result not searchable: ${JSON.stringify(memoryConsolidateExecutionSearch)}`);
+  }
+  const memoryHarnessEndpoint = await get("/api/memory/harness?query=CONSO_DECISION_SMOKE%20CONSO_PROCEDURE_SMOKE&limit=6&maxReads=3");
+  if (memoryHarnessEndpoint.schemaVersion !== "project-agent.memory-harness.v1" || !memoryHarnessEndpoint.automatic || !memoryHarnessEndpoint.appliedCalls?.some((call) => call.tool === "project_memory_read") || !memoryHarnessEndpoint.autoReads?.some((item) => item.snippet.includes("CONSO_DECISION_SMOKE"))) {
+    throw new Error(`memory harness endpoint missing automatic search/read results: ${JSON.stringify(memoryHarnessEndpoint)}`);
+  }
+  if (!memoryHarnessEndpoint.appliedCalls?.some((call) => call.tool === "project_memory_retention_audit") || !memoryHarnessEndpoint.lifecycle?.dogfood || !memoryHarnessEndpoint.lifecycle?.retention) {
+    throw new Error(`memory harness endpoint missing lifecycle automation: ${JSON.stringify(memoryHarnessEndpoint)}`);
+  }
+  const dogfoodSeedEndpoint = await post("/api/memory/seed-dogfood", {});
+  if (dogfoodSeedEndpoint.schemaVersion !== "project-agent.memory-dogfood-seed.v1" || !["ok", "seeded", "unavailable"].includes(dogfoodSeedEndpoint.status) || dogfoodSeedEndpoint.dryRun) {
+    throw new Error(`memory dogfood seed endpoint failed: ${JSON.stringify(dogfoodSeedEndpoint)}`);
+  }
+  const httpLifecycleMemory = await post("/api/memory", {
+    type: "fact",
+    title: "HTTP lifecycle update fact",
+    content: "HTTP_UPDATE_LIFECYCLE_SMOKE_OLD should become a newer memory body.",
+    sourceRefs: [".project-agent/runtime.json#events[0]"],
+    concepts: ["http-lifecycle"],
+    goalId,
+    confidence: 0.86,
+    importance: 6
+  });
+  const httpLifecycleUpdate = await post("/api/memory/update", {
+    ref: httpLifecycleMemory.ref,
+    reason: "HTTP smoke lifecycle update",
+    content: "HTTP_UPDATE_LIFECYCLE_SMOKE_NEW is searchable after update and cache refresh.",
+    concepts: ["http-lifecycle", "update"]
+  });
+  if (httpLifecycleUpdate.schemaVersion !== "project-agent.memory-update.v1" || httpLifecycleUpdate.dryRun || !httpLifecycleUpdate.refreshScheduled || !httpLifecycleUpdate.changedFields?.includes("content")) {
+    throw new Error(`memory update endpoint failed: ${JSON.stringify(httpLifecycleUpdate)}`);
+  }
+  const httpUpdateSearch = await get("/api/memory/search?query=HTTP_UPDATE_LIFECYCLE_SMOKE_NEW&useIndex=hybrid&limit=5");
+  if (!httpUpdateSearch.results?.some((item) => item.id === httpLifecycleMemory.record.id && item.snippet.includes("HTTP_UPDATE_LIFECYCLE_SMOKE_NEW")) || httpUpdateSearch.ranking?.optionalIndexes?.bm25?.used !== true) {
+    throw new Error(`memory update endpoint result not indexed/searchable: ${JSON.stringify(httpUpdateSearch)}`);
+  }
+  const httpSupersedeMemory = await post("/api/memory", {
+    type: "fact",
+    title: "HTTP supersede old fact",
+    content: "HTTP_SUPERSEDE_OLD_SMOKE should become non-latest.",
+    sourceRefs: [".project-agent/runtime.json#events[0]"],
+    concepts: ["http-supersede"],
+    goalId
+  });
+  const httpSupersedeDryRun = await post("/api/memory/supersede", {
+    ref: httpSupersedeMemory.ref,
+    dryRun: true,
+    reason: "HTTP supersede preview",
+    content: "HTTP_SUPERSEDE_NEW_SMOKE should become latest.",
+    sourceRefs: [".project-agent/runtime.json#events[0]"],
+    concepts: ["http-supersede", "lifecycle"]
+  });
+  if (!httpSupersedeDryRun.dryRun || httpSupersedeDryRun.plan?.old?.id !== httpSupersedeMemory.record.id) {
+    throw new Error(`memory supersede dry-run endpoint failed: ${JSON.stringify(httpSupersedeDryRun)}`);
+  }
+  const httpSupersede = await post("/api/memory/supersede", {
+    ref: httpSupersedeMemory.ref,
+    dryRun: false,
+    reason: "HTTP supersede execution",
+    content: "HTTP_SUPERSEDE_NEW_SMOKE should become latest.",
+    sourceRefs: [".project-agent/runtime.json#events[0]"],
+    concepts: ["http-supersede", "lifecycle"]
+  });
+  if (httpSupersede.dryRun || !httpSupersede.refreshScheduled || httpSupersede.oldRecord?.isLatest !== false || !httpSupersede.record?.supersedes?.includes(httpSupersedeMemory.record.id)) {
+    throw new Error(`memory supersede endpoint failed: ${JSON.stringify(httpSupersede)}`);
+  }
+  const httpExpiredMemory = await post("/api/memory", {
+    type: "episode",
+    title: "HTTP retention expired episode",
+    content: "HTTP_RETENTION_EXPIRED_SMOKE should expire through HTTP sweep.",
+    sourceRefs: [".project-agent/runtime.json#events[0]"],
+    concepts: ["http-retention"],
+    goalId,
+    validUntil: "2000-01-01T00:00:00.000Z"
+  });
+  const httpRetentionAudit = await get("/api/memory/retention?limit=100");
+  if (httpRetentionAudit.schemaVersion !== "project-agent.memory-retention-audit.v1" || !httpRetentionAudit.candidates?.some((item) => item.id === httpExpiredMemory.record.id && item.eligible)) {
+    throw new Error(`memory retention endpoint failed: ${JSON.stringify(httpRetentionAudit)}`);
+  }
+  const httpRetentionSweep = await post("/api/memory/retention/sweep", {
+    dryRun: false,
+    limit: 100,
+    reason: "HTTP retention sweep smoke"
+  });
+  if (httpRetentionSweep.dryRun || !httpRetentionSweep.refreshScheduled || !httpRetentionSweep.mutations?.some((item) => item.expired >= 1)) {
+    throw new Error(`memory retention sweep endpoint failed: ${JSON.stringify(httpRetentionSweep)}`);
+  }
+  const cliBootstrapEndpoint = await get("/api/cli-agent-bootstrap?query=CONSO_DECISION_SMOKE%20CONSO_PROCEDURE_SMOKE");
+  if (cliBootstrapEndpoint.memoryHarness?.schemaVersion !== "project-agent.memory-harness.v1" || !cliBootstrapEndpoint.markdown?.includes("Automatic Memory Harness") || !cliBootstrapEndpoint.memoryHarness?.autoReads?.some((item) => item.snippet.includes("CONSO_DECISION_SMOKE"))) {
+    throw new Error(`cli agent bootstrap missing automatic memory harness: ${JSON.stringify(cliBootstrapEndpoint.memoryHarness)}`);
+  }
+  const agentBootstrapEndpoint = await get("/api/agent/bootstrap");
+  const agentBootstrapProviders = new Set((agentBootstrapEndpoint.providers || []).map((provider) => provider.id));
+  if (
+    agentBootstrapEndpoint.schemaVersion !== "project-agent.agent-bootstrap.v1" ||
+    agentBootstrapEndpoint.status !== "ready" ||
+    !agentBootstrapProviders.has("codex") ||
+    !agentBootstrapProviders.has("claude") ||
+    !agentBootstrapProviders.has("generic") ||
+    agentBootstrapEndpoint.firstCall?.tool !== "project_takeover_summary" ||
+    agentBootstrapEndpoint.automaticHarness?.tool !== "project_memory_harness" ||
+    agentBootstrapEndpoint.automaticHarness?.arguments?.useIndex !== "hybrid" ||
+    agentBootstrapEndpoint.automation?.manualUserStepsRequired !== false ||
+    !agentBootstrapEndpoint.toolProtocol?.some((step) => step.tool === "project_context_search") ||
+    !agentBootstrapEndpoint.toolProtocol?.some((step) => step.tool === "project_record_event")
+  ) {
+    throw new Error(`agent bootstrap kit missing harness-consumable protocol: ${JSON.stringify(agentBootstrapEndpoint)}`);
+  }
+  const memoryAuditEndpoint = await get("/api/memory/audit?limit=10");
+  if (memoryAuditEndpoint.schemaVersion !== "project-agent.memory-audit-query.v1" || !["ok", "warn"].includes(memoryAuditEndpoint.status) || !memoryAuditEndpoint.entries?.some((item) => item.action === "memory_added") || !memoryAuditEndpoint.entries?.some((item) => item.action === "memory_consolidated") || !memoryAuditEndpoint.totals?.actionCounts) {
+    throw new Error(`memory audit endpoint missing canonical timeline rows: ${JSON.stringify(memoryAuditEndpoint)}`);
+  }
+  const memoryAuditForgetEndpoint = await get("/api/memory/audit?action=memory_forget_executed&limit=5");
+  if (!memoryAuditForgetEndpoint.entries?.some((item) => item.action === "memory_forget_executed")) {
+    throw new Error(`memory audit endpoint action filter failed: ${JSON.stringify(memoryAuditForgetEndpoint)}`);
   }
   const contextPromptEndpoint = await fetch(`${base}/api/agent-context-prompt?format=markdown&write=1`);
   if (!contextPromptEndpoint.ok) throw new Error(`/api/agent-context-prompt failed ${contextPromptEndpoint.status}: ${await contextPromptEndpoint.text()}`);
@@ -799,8 +1923,9 @@ try {
   }
   mkdirSync(path.join(projectDir, "src"), { recursive: true });
   writeFileSync(path.join(projectDir, "src", "workstream-smoke.js"), "export const smoke = true;\n", "utf8");
-  writeFileSync(path.join(projectDir, "src", "dep-target.js"), "export const dependencyTarget = \"target\";\n", "utf8");
-  writeFileSync(path.join(projectDir, "src", "dep-entry.js"), "import { dependencyTarget } from \"./dep-target.js\";\nexport const dependencyEntry = dependencyTarget;\n", "utf8");
+  writeFileSync(path.join(projectDir, "src", "dep-target.js"), "export function dependencyTarget() {\n  return \"target\";\n}\n", "utf8");
+  writeFileSync(path.join(projectDir, "src", "dep-entry.js"), "import { dependencyTarget } from \"./dep-target.js\";\nexport const dependencyEntry = dependencyTarget();\n", "utf8");
+  writeFileSync(path.join(projectDir, "src", "dep-target.test.js"), "import { dependencyTarget } from \"./dep-target.js\";\nif (dependencyTarget() !== \"target\") throw new Error(\"dep target smoke failed\");\n", "utf8");
   await post("/api/events", {
     phase: "execute",
     status: "current",
@@ -812,7 +1937,8 @@ try {
     files: [
       { path: "src/workstream-smoke.js", status: "added", summary: "+1/-0" },
       { path: "src/dep-target.js", status: "added", summary: "+1/-0" },
-      { path: "src/dep-entry.js", status: "added", summary: "+2/-0" }
+      { path: "src/dep-entry.js", status: "added", summary: "+2/-0" },
+      { path: "src/dep-target.test.js", status: "added", summary: "+2/-0" }
     ]
   });
   const codeWorkstreamInsights = await get(`/api/insights?role=coding_agent&goal=${goalId}`);
@@ -826,8 +1952,57 @@ try {
   if (!smokeCodeGraph.changedImpact?.some((item) => item.path === "src/dep-target.js" && item.dependents?.includes("src/dep-entry.js"))) {
     throw new Error(`code graph missing changed dependent impact: ${JSON.stringify(smokeCodeGraph?.changedImpact)}`);
   }
-  if (!codeWorkstreamInsights.continuity?.preEditRisk?.checks?.some((check) => check.id === "dependency_impact" && check.refs?.includes("src/dep-entry.js"))) {
+  if (!smokeCodeGraph.testOwnershipByPath?.["src/dep-target.js"]?.includes("src/dep-target.test.js") || !smokeCodeGraph.changedImpact?.some((item) => item.path === "src/dep-target.js" && item.tests?.includes("src/dep-target.test.js") && item.recommendedReads?.includes("src/dep-target.test.js"))) {
+    throw new Error(`code graph missing test ownership hints: ${JSON.stringify({ ownership: smokeCodeGraph.testOwnershipByPath, impact: smokeCodeGraph.changedImpact })}`);
+  }
+  const depTargetSymbols = smokeCodeGraph.symbolGraph?.symbolsByPath?.["src/dep-target.js"]?.exportedSymbols || [];
+  const depTargetSymbolDependents = smokeCodeGraph.symbolGraph?.symbolDependentsByPath?.["src/dep-target.js"] || [];
+  if (
+    smokeCodeGraph.symbolGraph?.schemaVersion !== "project-agent.symbol-graph-lite.v1" ||
+    !depTargetSymbols.some((symbol) => symbol.name === "dependencyTarget" && symbol.kind === "function") ||
+    !depTargetSymbolDependents.some((row) => row.source === "src/dep-entry.js" && row.imported === "dependencyTarget" && row.calls >= 1) ||
+    !smokeCodeGraph.changedImpact?.some((item) => item.path === "src/dep-target.js" && item.symbolDependents?.some((row) => row.source === "src/dep-entry.js" && row.calls >= 1) && item.recommendedReads?.includes("src/dep-entry.js"))
+  ) {
+    throw new Error(`code graph missing symbol-level dependency impact: ${JSON.stringify(smokeCodeGraph.symbolGraph)}`);
+  }
+  if (!codeWorkstreamInsights.continuity?.preEditRisk?.checks?.some((check) => check.id === "dependency_impact" && check.refs?.includes("src/dep-entry.js") && check.refs?.includes("src/dep-target.test.js"))) {
     throw new Error(`pre-edit risk missing dependency impact check: ${JSON.stringify(codeWorkstreamInsights.continuity?.preEditRisk)}`);
+  }
+  if (!codeWorkstreamInsights.continuity?.preEditRisk?.checks?.some((check) => check.id === "test_gap" && check.refs?.includes("src/dep-target.test.js"))) {
+    throw new Error(`pre-edit risk missing test ownership refs: ${JSON.stringify(codeWorkstreamInsights.continuity?.preEditRisk)}`);
+  }
+  const missingInspectionCoverage = codeWorkstreamInsights.continuity?.preEditRisk?.inspectionCoverage;
+  if (missingInspectionCoverage?.schemaVersion !== "project-agent.inspection-coverage.v1" || missingInspectionCoverage.status !== "warn" || !missingInspectionCoverage.missingRefs?.includes("src/dep-entry.js") || !missingInspectionCoverage.missingRefs?.includes("src/dep-target.test.js")) {
+    throw new Error(`pre-edit risk missing inspection coverage warning: ${JSON.stringify(missingInspectionCoverage)}`);
+  }
+  if (!codeWorkstreamInsights.continuity?.preEditRisk?.checks?.some((check) => check.id === "inspection_coverage" && check.status === "warn" && check.refs?.includes("src/dep-entry.js") && check.refs?.includes("src/dep-target.test.js"))) {
+    throw new Error(`pre-edit risk missing inspection coverage check: ${JSON.stringify(codeWorkstreamInsights.continuity?.preEditRisk)}`);
+  }
+  if (!codeWorkstreamInsights.continuity?.handoffLifecycle?.checks?.some((check) => check.id === "inspection_coverage" && check.status === "warn")) {
+    throw new Error(`handoff lifecycle missing inspection coverage warning: ${JSON.stringify(codeWorkstreamInsights.continuity?.handoffLifecycle)}`);
+  }
+  const handoffInspectionAudit = await mcpCall(projectDir, "project_handoff_audit", { refresh: true });
+  if (handoffInspectionAudit.inspectionCoverage?.status !== "warn" || !handoffInspectionAudit.warnings?.includes("inspection_coverage") || !handoffInspectionAudit.inspectionCoverage?.missingRefs?.includes("src/dep-target.test.js")) {
+    throw new Error(`MCP handoff audit missing inspection coverage warning: ${JSON.stringify(handoffInspectionAudit)}`);
+  }
+  await post("/api/events", {
+    phase: "evidence",
+    status: "done",
+    title: "Inspect dependency impact and run targeted test",
+    detail: "Read src/dep-entry.js and ran src/dep-target.test.js before accepting the code graph handoff.",
+    goalId,
+    agentId: "smoke-agent",
+    tool: "npm test",
+    refs: ["src/dep-entry.js", "src/dep-target.test.js"],
+    files: [
+      { path: "src/dep-entry.js", status: "inspected", summary: "read dependent" },
+      { path: "src/dep-target.test.js", status: "done", summary: "targeted test passed" }
+    ]
+  });
+  const inspectedCodeInsights = await get(`/api/insights?role=coding_agent&goal=${goalId}`);
+  const inspectedCoverage = inspectedCodeInsights.continuity?.preEditRisk?.inspectionCoverage;
+  if (inspectedCoverage?.status !== "ok" || !inspectedCoverage.inspectedRefs?.includes("src/dep-entry.js") || !inspectedCoverage.inspectedRefs?.includes("src/dep-target.test.js") || inspectedCoverage.missingRefs?.length) {
+    throw new Error(`inspection coverage did not resolve after evidence event: ${JSON.stringify(inspectedCoverage)}`);
   }
   if (!codeWorkstreamInsights.continuity?.continuityContract?.capabilities?.some((item) => item.id === "code_graph") || codeWorkstreamInsights.continuity?.continuityContract?.sourceOfTruth?.codeGraph !== ".project-agent/architecture-map.json#codeGraph") {
     throw new Error(`continuity contract missing code graph capability/source: ${JSON.stringify(codeWorkstreamInsights.continuity?.continuityContract)}`);
@@ -1398,6 +2573,27 @@ try {
     throw new Error(`continuity missing objective coverage proof sources: ${JSON.stringify(finalInsights.continuity?.objectiveCoverage)}`);
   }
   const appSource = readFileSync(path.join(process.cwd(), "src", "App.jsx"), "utf8");
+  if (!appSource.includes("HealthStrip") || !appSource.includes("data-health-strip") || !appSource.includes("/health") || !appSource.includes("Reconnect")) {
+    throw new Error("UI source missing visible health/reconnect strip");
+  }
+  if (!appSource.includes("StateTransferPanel") || !appSource.includes("data-state-transfer") || !appSource.includes("/state/export") || !appSource.includes("/state/import") || !appSource.includes("Preview Import")) {
+    throw new Error("UI source missing visible state import/export surface");
+  }
+  if (!appSource.includes("ProjectLauncherPanel") || !appSource.includes("data-project-launcher") || !appSource.includes("/projects/register") || !appSource.includes("/projects/launch") || !appSource.includes("/projects/stop") || !appSource.includes("/projects/restart") || !appSource.includes("/projects/logs") || !appSource.includes("data-launcher-logs") || !appSource.includes("Project Launcher")) {
+    throw new Error("UI source missing visible multi-project launcher surface");
+  }
+  if (!appSource.includes("AgentBootstrapPanel") || !appSource.includes("data-agent-bootstrap") || !appSource.includes("/agent/bootstrap") || !appSource.includes("project_memory_harness") || !appSource.includes("project_takeover_summary") || !appSource.includes("no manual json")) {
+    throw new Error("UI source missing visible agent bootstrap harness surface");
+  }
+  if (!appSource.includes("data-memory-lifecycle") || !appSource.includes("Dogfood") || !appSource.includes("Retention") || !appSource.includes("memory-lifecycle-strip")) {
+    throw new Error("UI source missing visible P0 memory lifecycle surface");
+  }
+  if (!appSource.includes("SandboxPermissionPanel") || !appSource.includes("data-sandbox-guidance") || !appSource.includes("/security/sandbox") || !appSource.includes("Sandbox & Permissions")) {
+    throw new Error("UI source missing visible sandbox and permission guidance surface");
+  }
+  if (!appSource.includes("AuthUnlockPanel") || !appSource.includes("data-auth-unlock") || !appSource.includes("project-agent-auth-token") || !appSource.includes("authToken=")) {
+    throw new Error("UI source missing optional auth unlock/token propagation surface");
+  }
   if (!appSource.includes("GovernanceSpecPanel") || !appSource.includes("data-governance-spec")) {
     throw new Error("UI source missing visible governance spec panel");
   }
@@ -1409,6 +2605,9 @@ try {
   }
   if (!appSource.includes("ObjectiveCoveragePanel") || !appSource.includes("data-objective-coverage") || !appSource.includes("Objective Coverage")) {
     throw new Error("UI source missing visible objective coverage panel");
+  }
+  if (!appSource.includes("data-code-graph-symbols") || !appSource.includes("symbolDependents") || !appSource.includes("symbols {")) {
+    throw new Error("UI source missing visible symbol-level code graph surface");
   }
   if (!appSource.includes("DevelopmentTrailPanel") || !appSource.includes("data-development-trail") || !appSource.includes("Development Trail")) {
     throw new Error("UI source missing visible process-to-architecture development trail");
