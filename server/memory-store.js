@@ -6,6 +6,7 @@ import {
   readFileSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync
 } from "node:fs";
 import path from "node:path";
@@ -29,11 +30,13 @@ const CANONICAL_FILES = [
   "evidence.jsonl",
   "risks.jsonl",
   "audit.jsonl",
+  "access.jsonl",
   "retention.json"
 ];
 const MEMORY_SEARCH_INDEX_REF = ".project-agent/indexes/memory-bm25.json";
 const MEMORY_ENTITY_INDEX_REF = ".project-agent/indexes/memory-entities.json";
 const MEMORY_VECTOR_INDEX_REF = ".project-agent/indexes/memory-vectors.json";
+const MEMORY_ACCESS_AUDIT_REF = ".project-agent/memory/access.jsonl";
 const MEMORY_GAP_BENCHMARK_REF = "docs/research/memory-gap-deep-benchmark.md";
 const DOGFOOD_SEED_CONCEPT = "dogfood-seed";
 const LIFECYCLE_REFRESH_TARGETS = [
@@ -102,6 +105,20 @@ const DERIVED_STATE_FILES = new Set([
   "takeover-acceptance-audit.json",
   "takeover-packet.json",
   "takeover-summary.json"
+]);
+const CLEANUP_PROTECTED_STATE_REFS = new Set([
+  ".project-agent/agent-context-bundle.json",
+  ".project-agent/architecture-map.json",
+  ".project-agent/context-starter-prompt.md",
+  ".project-agent/continuity-audit.json",
+  ".project-agent/continuity-contract.json",
+  ".project-agent/continuity.json",
+  ".project-agent/memory-graph.json",
+  ".project-agent/process-trace.json",
+  ".project-agent/state-manifest.json",
+  ".project-agent/takeover-acceptance-audit.json",
+  ".project-agent/takeover-packet.json",
+  ".project-agent/takeover-summary.json"
 ]);
 const SOURCE_STATE_FILES = new Set(["state.json", "governance-spec.json", "agent-runbook.json", "continuity-contract.json"]);
 const VOLATILE_STATE_FILES = new Set(["runtime.json"]);
@@ -234,6 +251,7 @@ function defaultIndexMarkdown(projectName) {
     "- `evidence.jsonl`: tests, commands, screenshots, reports",
     "- `risks.jsonl`: known hazards, blockers, stale assumptions",
     "- `audit.jsonl`: append-only memory lifecycle log",
+    "- `access.jsonl`: bounded memory read/search access log",
     "- `retention.json`: inspectable retention policy",
     ""
   ].join("\n");
@@ -322,6 +340,12 @@ function appendJsonl(filePath, record) {
   writeJsonlFile(filePath, [...existing, record]);
 }
 
+function appendBoundedJsonl(filePath, record, maxRows = 200) {
+  const limit = Math.max(20, Math.min(2000, Number(maxRows || 200)));
+  const existing = readJsonlFile(filePath).records;
+  writeJsonlFile(filePath, [...existing.slice(Math.max(0, existing.length - limit + 1)), record]);
+}
+
 function appendAudit(projectDir, action, payload = {}) {
   const audit = {
     id: stableId("aud"),
@@ -332,6 +356,20 @@ function appendAudit(projectDir, action, payload = {}) {
   };
   appendJsonl(path.join(memoryDir(projectDir), "audit.jsonl"), audit);
   return audit;
+}
+
+function appendAccessAudit(projectDir, action, payload = {}, input = {}) {
+  const access = {
+    id: stableId("acc"),
+    schemaVersion: "project-agent.memory-access.v1",
+    action,
+    createdAt: nowIso(),
+    actor: input.accessActor || input.agentId || payload.actor || "unknown",
+    tool: input.accessTool || payload.tool || action,
+    ...payload
+  };
+  appendBoundedJsonl(path.join(memoryDir(projectDir), "access.jsonl"), access, input.accessAuditMaxRows || input.maxRows || 200);
+  return access;
 }
 
 function validateMemoryRecord(record, options = {}) {
@@ -2215,7 +2253,12 @@ export function buildMemoryInventory(projectDir) {
         "project_memory_update",
         "project_memory_supersede",
         "project_memory_retention_audit",
-        "project_memory_retention_sweep"
+        "project_memory_retention_sweep",
+        "project_memory_rebuild_all_indexes",
+        "project_memory_privacy_audit",
+        "project_memory_generated_cleanup",
+        "project_memory_consolidate_v2",
+        "project_memory_access_audit"
       ]
     },
     totals: {
@@ -2240,6 +2283,377 @@ export function buildMemoryInventory(projectDir) {
       largestFiles: files.slice().sort((a, b) => b.bytes - a.bytes).slice(0, 8),
       growingSurfaces: files.filter((file) => file.class === "volatile" || file.riskFlags.includes("large_file")).slice(0, 12)
     }
+  };
+}
+
+export function rebuildAllMemoryIndexes(projectDir, input = {}) {
+  const root = stateDir(projectDir);
+  const statePath = path.join(root, "state.json");
+  if (!existsSync(root) || !existsSync(statePath)) {
+    return {
+      schemaVersion: "project-agent.memory-all-indexes-rebuild.v1",
+      ok: true,
+      status: "not_started",
+      projectDir,
+      generatedAt: nowIso(),
+      summary: "Project has not been started; memory indexes can be rebuilt after project_start.",
+      indexes: {
+        memorySearch: inspectMemorySearchIndex(projectDir),
+        memoryEntities: inspectMemoryEntityIndex(projectDir),
+        memoryVectors: inspectMemoryVectorIndex(projectDir)
+      },
+      refs: []
+    };
+  }
+  ensureMemoryStore(projectDir, { audit: false });
+  const markdown = buildIndex(projectDir);
+  const memorySearch = rebuildMemorySearchIndex(projectDir, { audit: false });
+  const memoryEntities = rebuildMemoryEntityIndex(projectDir, { audit: false });
+  const memoryVectors = rebuildMemoryVectorIndex(projectDir, { audit: false });
+  const indexes = {
+    indexMarkdown: {
+      status: "fresh",
+      ref: ".project-agent/memory/index.md",
+      records: markdown.records,
+      counts: markdown.counts
+    },
+    memorySearch: memorySearch.index || memorySearch,
+    memoryEntities: memoryEntities.index || memoryEntities,
+    memoryVectors: memoryVectors.index || memoryVectors,
+    semantic: {
+      status: "future_gated",
+      engine: "provider-backed-embeddings",
+      embeddingProvider: process.env.CLI_MEMO_MEMORY_EMBEDDER || "none",
+      reason: "Remote or provider-backed embeddings are intentionally optional; lexical-vector-lite remains the deterministic local cache."
+    }
+  };
+  const statuses = [indexes.memorySearch.status, indexes.memoryEntities.status, indexes.memoryVectors.status];
+  const status = statuses.every((item) => item === "fresh") ? "fresh" : "warn";
+  const audit = input.audit === false
+    ? null
+    : appendAudit(projectDir, "memory_all_indexes_rebuilt", {
+        refs: [".project-agent/memory/index.md", MEMORY_SEARCH_INDEX_REF, MEMORY_ENTITY_INDEX_REF, MEMORY_VECTOR_INDEX_REF],
+        summary: `Rebuilt canonical index markdown plus ${statuses.filter((item) => item === "fresh").length}/3 optional memory indexes.`,
+        indexes: Object.fromEntries(Object.entries(indexes).map(([key, value]) => [key, value.status || null])),
+        canonicalHash: indexes.memorySearch.currentHash || indexes.memorySearch.canonicalHash || null
+      });
+  return {
+    schemaVersion: "project-agent.memory-all-indexes-rebuild.v1",
+    ok: true,
+    status,
+    projectDir,
+    generatedAt: nowIso(),
+    summary: status === "fresh"
+      ? "Rebuilt canonical memory index markdown, BM25, entity, and lexical-vector caches from source JSONL memory."
+      : "Rebuilt memory indexes, but one or more optional cache statuses require inspection.",
+    indexes,
+    auditRef: audit ? `.project-agent/memory/audit.jsonl#${audit.id}` : null,
+    refs: [".project-agent/memory/index.md", MEMORY_SEARCH_INDEX_REF, MEMORY_ENTITY_INDEX_REF, MEMORY_VECTOR_INDEX_REF]
+  };
+}
+
+function privacyFinding(findings, finding = {}) {
+  if (findings.length >= 120) return;
+  findings.push({
+    severity: finding.severity || "medium",
+    category: finding.category || "memory_privacy",
+    ref: finding.ref || null,
+    title: finding.title || finding.category || "Privacy finding",
+    detail: compact(finding.detail || "", 240),
+    rules: finding.rules || [],
+    action: finding.action || "inspect"
+  });
+}
+
+function textFileForPrivacy(relPath = "") {
+  return /\.(json|jsonl|md|txt|yaml|yml|toml)$/i.test(relPath);
+}
+
+export function auditMemoryPrivacy(projectDir, input = {}) {
+  const root = stateDir(projectDir);
+  if (!existsSync(root) || !existsSync(path.join(root, "state.json"))) {
+    return {
+      schemaVersion: "project-agent.memory-privacy-audit.v1",
+      ok: true,
+      status: "not_started",
+      projectDir,
+      generatedAt: nowIso(),
+      summary: "Project has not been started; privacy audit will begin after project_start.",
+      findings: [],
+      totals: { records: 0, filesScanned: 0, findings: 0, high: 0, errors: 0 },
+      refs: []
+    };
+  }
+  ensureMemoryStore(projectDir, { audit: false });
+  const policy = readRetentionPolicy(projectDir);
+  const all = readAllMemory(projectDir);
+  const audit = readAuditRows(projectDir);
+  const findings = [];
+  const maxFileBytes = Math.max(1024, Math.min(1024 * 1024, Number(input.maxFileBytes || 256000)));
+  let filesScanned = 0;
+  let skippedLargeFiles = 0;
+  for (const record of all.records) {
+    const quality = sourceQualityForRecord(record);
+    const recordRef = record.ref || canonicalRef(record);
+    const secretFindings = scanSecretLikeText([record.title, record.content, ...(record.sourceRefs || []), ...(record.files || [])].join("\n"));
+    if (secretFindings.length) {
+      privacyFinding(findings, {
+        severity: "high",
+        category: "secret_like_canonical_memory",
+        ref: recordRef,
+        title: record.title,
+        detail: "Canonical memory contains secret-like text after writer redaction; inspect and redact or forget the record.",
+        rules: [...new Set(secretFindings.map((finding) => finding.rule))],
+        action: "project_memory_forget mode=redact"
+      });
+    }
+    if (quality.reasons.includes("missing_source_refs") || quality.status === "weak") {
+      privacyFinding(findings, {
+        severity: quality.reasons.includes("missing_source_refs") ? "high" : "medium",
+        category: "weak_memory_provenance",
+        ref: recordRef,
+        title: record.title,
+        detail: `Source quality is ${quality.status}; reasons: ${quality.reasons.join(", ") || "unknown"}.`,
+        action: "project_memory_update sourceRefs=[...]"
+      });
+    }
+    if (policy.limits?.allowRawArchitectureText === false && (record.sourceRefs || []).some((ref) => refMatches(ref, ".project-agent/architecture-map.json")) && String(record.content || "").length > 1200) {
+      privacyFinding(findings, {
+        severity: "medium",
+        category: "raw_architecture_text_policy",
+        ref: recordRef,
+        title: record.title,
+        detail: "Retention policy disallows raw architecture text; this memory cites architecture-map and has a long content body.",
+        action: "summarize or update memory content"
+      });
+    }
+    const audited = audit.records.some((entry) =>
+      entry.memoryId === record.id ||
+      entry.oldMemoryId === record.id ||
+      entry.newMemoryId === record.id ||
+      (entry.refs || []).some((ref) => refMatches(ref, recordRef)) ||
+      (entry.created || []).some((item) => item.id === record.id || refMatches(item.ref, recordRef))
+    );
+    if (!audited) {
+      privacyFinding(findings, {
+        severity: "low",
+        category: "writer_audit_gap",
+        ref: recordRef,
+        title: record.title,
+        detail: "Canonical memory exists without an obvious lifecycle audit row; this can happen after import or manual edits.",
+        action: "inspect provenance and update if needed"
+      });
+    }
+  }
+  for (const file of walkStateFiles(projectDir)) {
+    if (!textFileForPrivacy(file.relPath)) continue;
+    if (file.bytes > maxFileBytes) {
+      skippedLargeFiles += 1;
+      continue;
+    }
+    let text = "";
+    try {
+      text = readFileSync(file.abs, "utf8");
+      filesScanned += 1;
+    } catch (error) {
+      privacyFinding(findings, {
+        severity: "low",
+        category: "privacy_scan_error",
+        ref: file.relPath,
+        detail: error.message || String(error),
+        action: "inspect file readability"
+      });
+      continue;
+    }
+    const secretFindings = scanSecretLikeText(text);
+    if (secretFindings.length) {
+      const classification = classifyStateFile(file.relPath);
+      privacyFinding(findings, {
+        severity: classification === "source" || classification === "volatile" ? "high" : "medium",
+        category: "secret_like_state_surface",
+        ref: file.relPath,
+        title: path.posix.basename(file.relPath),
+        detail: `${classification} state file contains secret-like text; redact source memory or clean generated state before sharing/export.`,
+        rules: [...new Set(secretFindings.map((finding) => finding.rule))],
+        action: classification === "derived" || classification === "index" ? "project_memory_generated_cleanup" : "project_memory_forget mode=redact"
+      });
+    }
+    if (policy.limits?.allowRawArchitectureText === false && /(^|\/)architecture-map\.json$/.test(file.relPath) && text.includes('"text"')) {
+      privacyFinding(findings, {
+        severity: "medium",
+        category: "raw_architecture_text_policy",
+        ref: file.relPath,
+        title: "Architecture map raw text",
+        detail: "Retention policy disallows raw architecture text and this architecture map appears to include text fields.",
+        action: "refresh architecture map or generated cleanup"
+      });
+    }
+  }
+  const totals = {
+    records: all.records.length,
+    filesScanned,
+    skippedLargeFiles,
+    findings: findings.length,
+    high: findings.filter((finding) => finding.severity === "high").length,
+    medium: findings.filter((finding) => finding.severity === "medium").length,
+    low: findings.filter((finding) => finding.severity === "low").length,
+    errors: all.errors.length + audit.errors.length
+  };
+  const status = totals.high || totals.errors ? "warn" : totals.findings ? "watch" : "ok";
+  const result = {
+    schemaVersion: "project-agent.memory-privacy-audit.v1",
+    ok: true,
+    status,
+    projectDir,
+    generatedAt: nowIso(),
+    summary: totals.findings
+      ? `Privacy audit found ${totals.findings} finding(s), including ${totals.high} high severity item(s).`
+      : "Privacy audit found no secret-like canonical/state surfaces in scanned files.",
+    policy: {
+      ref: ".project-agent/memory/retention.json",
+      allowRawArchitectureText: policy.limits?.allowRawArchitectureText === true,
+      generatedBundleMaxBytes: policy.limits?.generatedBundleMaxBytes || null
+    },
+    findings: findings.slice(0, Math.max(1, Math.min(100, Number(input.limit || 40)))),
+    totals,
+    errors: [...all.errors, ...audit.errors].slice(0, 12),
+    refs: [".project-agent/memory/retention.json", ".project-agent/memory/audit.jsonl", ...findings.map((finding) => finding.ref).filter(Boolean)].slice(0, 40)
+  };
+  if (input.audit === true) {
+    const auditRow = appendAudit(projectDir, "memory_privacy_audited", {
+      dryRun: true,
+      summary: result.summary,
+      affected: totals,
+      refs: result.refs,
+      contentHash: sha256(JSON.stringify({ totals, findings: result.findings }))
+    });
+    result.auditRef = `.project-agent/memory/audit.jsonl#${auditRow.id}`;
+  }
+  return result;
+}
+
+function generatedCleanupCandidates(projectDir, input = {}) {
+  const policy = readRetentionPolicy(projectDir);
+  const threshold = Math.max(0, Number(input.maxBytes ?? policy.limits?.generatedBundleMaxBytes ?? 0));
+  const mode = String(input.mode || "overLimit");
+  const refs = normalizeRefs(normalizeArray(input.ref || input.refs));
+  const includeIndexes = input.includeIndexes === true || mode === "rebuildable";
+  const inventory = buildMemoryInventory(projectDir);
+  const candidates = (inventory.files || [])
+    .filter((file) => file.safeToDelete)
+    .filter((file) => refs.length || !CLEANUP_PROTECTED_STATE_REFS.has(file.ref))
+    .filter((file) => includeIndexes || file.class !== "index")
+    .filter((file) => {
+      if (refs.length) return refs.some((ref) => refMatches(file.ref, ref));
+      if (mode === "rebuildable") return true;
+      if (mode === "indexes") return file.class === "index";
+      return file.class === "derived" && threshold > 0 && file.bytes > threshold;
+    })
+    .sort((a, b) => b.bytes - a.bytes || a.ref.localeCompare(b.ref))
+    .slice(0, Math.max(1, Math.min(100, Number(input.limit || 50))))
+    .map((file) => ({
+      ref: file.ref,
+      class: file.class,
+      bytes: file.bytes,
+      modifiedAt: file.modifiedAt,
+      safeToDelete: file.safeToDelete,
+      reason: refs.length ? "explicit_ref" : mode === "rebuildable" ? "rebuildable_state" : file.class === "index" ? "optional_index_cache" : "generated_bundle_over_limit"
+    }));
+  return { candidates, inventory, threshold, mode, includeIndexes };
+}
+
+export function cleanupGeneratedMemoryState(projectDir, input = {}) {
+  const root = stateDir(projectDir);
+  if (!existsSync(root) || !existsSync(path.join(root, "state.json"))) {
+    return {
+      schemaVersion: "project-agent.memory-generated-cleanup.v1",
+      ok: true,
+      status: "not_started",
+      dryRun: input.dryRun !== false,
+      projectDir,
+      generatedAt: nowIso(),
+      summary: "Project has not been started; generated state cleanup will begin after project_start.",
+      candidates: [],
+      removed: [],
+      failed: [],
+      refs: []
+    };
+  }
+  ensureMemoryStore(projectDir, { audit: false });
+  const dryRun = input.dryRun !== false;
+  const plan = generatedCleanupCandidates(projectDir, input);
+  const refs = plan.candidates.map((candidate) => candidate.ref);
+  if (dryRun) {
+    const audit = input.audit === false
+      ? null
+      : appendAudit(projectDir, "memory_generated_cleanup_dry_run", {
+          dryRun: true,
+          summary: `Generated cleanup dry-run found ${plan.candidates.length} rebuildable candidate(s).`,
+          affected: { candidates: plan.candidates.length, bytes: plan.candidates.reduce((sum, item) => sum + item.bytes, 0) },
+          refs,
+          contentHash: sha256(JSON.stringify(plan.candidates))
+        });
+    return {
+      schemaVersion: "project-agent.memory-generated-cleanup.v1",
+      ok: true,
+      status: plan.candidates.length ? "dry_run" : "empty",
+      dryRun: true,
+      projectDir,
+      generatedAt: nowIso(),
+      summary: plan.candidates.length
+        ? `Generated cleanup would remove ${plan.candidates.length} rebuildable file(s).`
+        : "Generated cleanup found no matching rebuildable files.",
+      mode: plan.mode,
+      thresholdBytes: plan.threshold,
+      candidates: plan.candidates,
+      removed: [],
+      failed: [],
+      auditRef: audit ? `.project-agent/memory/audit.jsonl#${audit.id}` : null,
+      refs
+    };
+  }
+  const removed = [];
+  const failed = [];
+  for (const candidate of plan.candidates) {
+    const abs = path.join(projectDir, candidate.ref);
+    try {
+      if (existsSync(abs)) unlinkSync(abs);
+      removed.push(candidate);
+    } catch (error) {
+      failed.push({ ...candidate, error: error.message || String(error) });
+    }
+  }
+  const refresh = input.rebuildIndexes === false ? null : rebuildAllMemoryIndexes(projectDir, { audit: false });
+  const audit = appendAudit(projectDir, "memory_generated_cleanup_executed", {
+    dryRun: false,
+    summary: `Generated cleanup removed ${removed.length} rebuildable file(s); ${failed.length} failed.`,
+    affected: {
+      candidates: plan.candidates.length,
+      removed: removed.length,
+      failed: failed.length,
+      bytes: removed.reduce((sum, item) => sum + item.bytes, 0)
+    },
+    refs: [...removed.map((item) => item.ref), ...failed.map((item) => item.ref)].slice(0, 40),
+    contentHash: sha256(JSON.stringify({ removed, failed }))
+  });
+  return {
+    schemaVersion: "project-agent.memory-generated-cleanup.v1",
+    ok: failed.length === 0,
+    status: failed.length ? "warn" : removed.length ? "ok" : "empty",
+    dryRun: false,
+    projectDir,
+    generatedAt: nowIso(),
+    summary: removed.length
+      ? `Removed ${removed.length} rebuildable generated/index file(s).`
+      : "Generated cleanup had no matching files to remove.",
+    mode: plan.mode,
+    thresholdBytes: plan.threshold,
+    candidates: plan.candidates,
+    removed,
+    failed,
+    refresh,
+    auditRef: `.project-agent/memory/audit.jsonl#${audit.id}`,
+    refs: [".project-agent/memory/audit.jsonl", ...removed.map((item) => item.ref)].slice(0, 40)
   };
 }
 
@@ -2321,6 +2735,161 @@ function auditEntrySummary(entry = {}) {
   }
   if (entry.action?.includes("store_")) return entry.action.replace(/_/g, " ");
   return entry.action || "memory audit event";
+}
+
+function readAccessRows(projectDir) {
+  const filePath = path.join(memoryDir(projectDir), "access.jsonl");
+  if (!existsSync(filePath)) return { records: [], errors: [] };
+  const raw = readFileSync(filePath, "utf8");
+  const records = [];
+  const errors = [];
+  raw.split(/\r?\n/).forEach((line, index) => {
+    if (!line.trim()) return;
+    try {
+      const record = JSON.parse(line);
+      records.push({
+        ...record,
+        ref: `${MEMORY_ACCESS_AUDIT_REF}#${record.id || `line-${index + 1}`}`,
+        line: index + 1
+      });
+    } catch (error) {
+      errors.push({
+        line: index + 1,
+        ref: `${MEMORY_ACCESS_AUDIT_REF}:${index + 1}`,
+        errors: [error.message || String(error)]
+      });
+    }
+  });
+  return { records, errors };
+}
+
+function accessMatches(entry = {}, input = {}) {
+  if (input.action && entry.action !== input.action) return false;
+  if (input.tool && entry.tool !== input.tool) return false;
+  if (input.actor && entry.actor !== input.actor) return false;
+  if (input.query && !String(entry.query || "").toLowerCase().includes(String(input.query).toLowerCase())) return false;
+  if (input.ref) {
+    const refs = [entry.ref, ...(entry.refs || []), ...(entry.selectedRefs || [])].filter(Boolean);
+    if (!refs.some((ref) => refMatches(ref, input.ref))) return false;
+  }
+  if (input.since || input.until) {
+    const createdAt = Date.parse(entry.createdAt || "");
+    if (!Number.isFinite(createdAt)) return false;
+    const since = input.since ? Date.parse(input.since) : null;
+    const until = input.until ? Date.parse(input.until) : null;
+    if (since && createdAt < since) return false;
+    if (until && createdAt > until) return false;
+  }
+  return true;
+}
+
+function accessEntrySummary(entry = {}) {
+  if (entry.summary) return compact(entry.summary, 180);
+  if (entry.action === "memory_search_accessed") return `Searched memory for "${compact(entry.query || "", 80)}" and returned ${entry.returned || 0} result(s).`;
+  if (entry.action === "memory_read_accessed") return `Read memory ${entry.memoryId || entry.target || ""}`.trim();
+  return entry.action || "memory access event";
+}
+
+function compactAccessRef(access = null) {
+  if (!access) return null;
+  if (access.error) return { status: "error", error: access.error };
+  return { status: "recorded", ref: `${MEMORY_ACCESS_AUDIT_REF}#${access.id}`, id: access.id };
+}
+
+function recordMemoryAccess(projectDir, action, payload = {}, input = {}) {
+  if (input.auditAccess !== true) return null;
+  try {
+    return appendAccessAudit(projectDir, action, payload, input);
+  } catch (error) {
+    return { error: error.message || String(error) };
+  }
+}
+
+export function queryMemoryAccessAudit(projectDir, input = {}) {
+  const root = stateDir(projectDir);
+  const accessPath = path.join(memoryDir(projectDir), "access.jsonl");
+  if (!existsSync(root) || !existsSync(path.join(root, "state.json"))) {
+    return {
+      schemaVersion: "project-agent.memory-access-audit-query.v1",
+      ok: true,
+      status: "not_started",
+      projectDir,
+      generatedAt: nowIso(),
+      summary: "Project has not been started; no memory access audit exists yet.",
+      entries: [],
+      totals: { entries: 0, returned: 0, errors: 0 },
+      errors: [],
+      refs: []
+    };
+  }
+  if (!existsSync(accessPath)) {
+    return {
+      schemaVersion: "project-agent.memory-access-audit-query.v1",
+      ok: true,
+      status: "empty",
+      projectDir,
+      generatedAt: nowIso(),
+      summary: "No memory read/search access has been recorded yet.",
+      entries: [],
+      totals: { entries: 0, returned: 0, errors: 0 },
+      errors: [],
+      refs: [MEMORY_ACCESS_AUDIT_REF]
+    };
+  }
+  const limit = Math.max(1, Math.min(200, Number(input.limit || 20)));
+  const access = readAccessRows(projectDir);
+  const filtered = access.records
+    .filter((entry) => accessMatches(entry, input))
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const entries = filtered.slice(0, limit).map((entry) => ({
+    id: entry.id,
+    action: entry.action,
+    actor: entry.actor || null,
+    tool: entry.tool || null,
+    query: entry.query || null,
+    target: entry.target || null,
+    memoryId: entry.memoryId || null,
+    returned: entry.returned ?? null,
+    selectedRefs: (entry.selectedRefs || []).slice(0, 8),
+    createdAt: entry.createdAt || null,
+    summary: accessEntrySummary(entry),
+    refs: [entry.ref, ...(entry.refs || []), ...(entry.selectedRefs || [])].filter(Boolean).slice(0, 12),
+    ref: entry.ref
+  }));
+  const actionCounts = filtered.reduce((acc, entry) => {
+    acc[entry.action || "unknown"] = (acc[entry.action || "unknown"] || 0) + 1;
+    return acc;
+  }, {});
+  return {
+    schemaVersion: "project-agent.memory-access-audit-query.v1",
+    ok: true,
+    status: access.errors.length ? "warn" : "ok",
+    projectDir,
+    generatedAt: nowIso(),
+    summary: `Memory access audit has ${access.records.length} bounded row(s); ${filtered.length} match the current filter.`,
+    query: {
+      action: input.action || null,
+      tool: input.tool || null,
+      actor: input.actor || null,
+      query: input.query || null,
+      ref: input.ref || null,
+      since: input.since || null,
+      until: input.until || null,
+      limit
+    },
+    entries,
+    totals: {
+      entries: access.records.length,
+      matched: filtered.length,
+      returned: entries.length,
+      errors: access.errors.length,
+      bounded: true,
+      maxRows: 200,
+      actionCounts
+    },
+    errors: access.errors.slice(0, 12),
+    refs: [MEMORY_ACCESS_AUDIT_REF, ...entries.flatMap((entry) => entry.refs).slice(0, 24)]
+  };
 }
 
 export function queryMemoryAudit(projectDir, input = {}) {
@@ -3122,6 +3691,359 @@ export function consolidateMemory(projectDir, input = {}) {
   };
 }
 
+function textSimilarityTokens(value = "") {
+  return new Set(tokenizeForIndex(value)
+    .map((term) => term.toLowerCase())
+    .filter((term) => term.length >= 4)
+    .slice(0, 80));
+}
+
+function jaccardScore(left = new Set(), right = new Set()) {
+  if (!left.size || !right.size) return 0;
+  let overlap = 0;
+  for (const item of left) {
+    if (right.has(item)) overlap += 1;
+  }
+  return overlap / (left.size + right.size - overlap);
+}
+
+function conceptOverlapScore(left = [], right = []) {
+  const leftSet = new Set((left || []).map((item) => String(item || "").toLowerCase()).filter(Boolean));
+  const rightSet = new Set((right || []).map((item) => String(item || "").toLowerCase()).filter(Boolean));
+  return jaccardScore(leftSet, rightSet);
+}
+
+function replacementLanguageScore(candidate = {}) {
+  const text = `${candidate.title || ""} ${candidate.content || ""}`.toLowerCase();
+  return /\b(replace|replaces|supersede|supersedes|deprecated|no longer|instead|newer|new canonical|obsolete)\b/.test(text) || /替代|废弃|取代|不再/.test(text) ? 1 : 0;
+}
+
+function consolidationV2SimilarRecord(candidate = {}, records = []) {
+  const candidateTokens = textSimilarityTokens(`${candidate.title || ""} ${candidate.content || ""}`);
+  let best = null;
+  for (const record of records) {
+    if (record.isLatest === false) continue;
+    const titleHit = normalizeSearchText(record.title) === normalizeSearchText(candidate.title);
+    const sameType = normalizeType(record.type) === normalizeType(candidate.type);
+    const recordTokens = textSimilarityTokens(`${record.title || ""} ${record.content || ""}`);
+    const lexical = jaccardScore(candidateTokens, recordTokens);
+    const concepts = conceptOverlapScore(candidate.concepts || [], record.concepts || []);
+    const sourceOverlap = conceptOverlapScore(candidate.sourceRefs || [], record.sourceRefs || []);
+    const score = (titleHit ? 0.45 : 0) + (sameType ? 0.18 : 0) + lexical * 0.28 + concepts * 0.16 + sourceOverlap * 0.1;
+    if (!best || score > best.score) {
+      best = {
+        record,
+        score: Number(score.toFixed(3)),
+        signals: {
+          titleHit,
+          sameType,
+          lexical: Number(lexical.toFixed(3)),
+          concepts: Number(concepts.toFixed(3)),
+          sourceOverlap: Number(sourceOverlap.toFixed(3))
+        }
+      };
+    }
+  }
+  return best && best.score >= 0.42 ? best : null;
+}
+
+function consolidationV2Proposal(projectDir, candidate = {}, records = [], input = {}) {
+  const similar = consolidationV2SimilarRecord(candidate, records);
+  if (candidate.status === "duplicate") {
+    return {
+      ...candidate,
+      proposalId: `prop_${candidate.id}`,
+      operation: "skip",
+      v2Status: "duplicate",
+      reason: "Candidate already exists in canonical memory.",
+      matchedRecord: candidate.duplicateOf ? { ref: candidate.duplicateOf } : null,
+      semanticSignals: { engine: "semantic-signals-lite", duplicateOf: candidate.duplicateOf || null }
+    };
+  }
+  if (candidate.status !== "ready") {
+    return {
+      ...candidate,
+      proposalId: `prop_${candidate.id}`,
+      operation: "skip",
+      v2Status: candidate.status,
+      reason: "Candidate is not durable enough for an automatic write.",
+      semanticSignals: { engine: "semantic-signals-lite" }
+    };
+  }
+  if (similar) {
+    const operation = replacementLanguageScore(candidate) || input.preferSupersede === true ? "supersede" : "update";
+    return {
+      ...candidate,
+      proposalId: `prop_${candidate.id}`,
+      operation,
+      v2Status: "ready",
+      reason: operation === "supersede"
+        ? "Candidate appears to replace an existing latest memory."
+        : "Candidate appears to refine an existing latest memory.",
+      matchedRecord: {
+        id: similar.record.id,
+        type: similar.record.type,
+        title: similar.record.title,
+        ref: similar.record.ref,
+        version: similar.record.version || 1
+      },
+      semanticSignals: {
+        engine: "semantic-signals-lite",
+        score: similar.score,
+        ...similar.signals
+      }
+    };
+  }
+  return {
+    ...candidate,
+    proposalId: `prop_${candidate.id}`,
+    operation: "add",
+    v2Status: "ready",
+    reason: "Candidate has no close latest-memory match and can be promoted as new durable memory.",
+    matchedRecord: null,
+    semanticSignals: { engine: "semantic-signals-lite", score: 0 }
+  };
+}
+
+function consolidationV2RetentionProposals(projectDir, input = {}) {
+  if (input.includeRetention === false) return [];
+  const retention = auditMemoryRetention(projectDir, { limit: input.retentionLimit || 50, audit: false });
+  return (retention.candidates || [])
+    .filter((candidate) => candidate.kind === "memory" && candidate.eligible && candidate.action === "expire")
+    .map((candidate) => ({
+      id: `ret_${candidate.id}`,
+      proposalId: `prop_ret_${candidate.id}`,
+      source: "retention",
+      type: candidate.type,
+      title: candidate.title,
+      content: `Retention policy marks ${candidate.id} eligible for expiry: ${(candidate.reasons || []).join(", ")}.`,
+      sourceRefs: [candidate.ref, ".project-agent/memory/retention.json"].filter(Boolean),
+      files: [],
+      concepts: ["consolidation-v2", "retention", "expire"],
+      confidence: 0.9,
+      importance: candidate.importance ?? 5,
+      observedAt: nowIso(),
+      status: "ready",
+      v2Status: "ready",
+      operation: "expire",
+      reason: "Retention audit found an eligible expired canonical memory record.",
+      matchedRecord: {
+        id: candidate.id,
+        type: candidate.type,
+        title: candidate.title,
+        ref: candidate.ref
+      },
+      semanticSignals: { engine: "retention-policy", reasons: candidate.reasons || [] }
+    }));
+}
+
+function selectedConsolidationV2Proposals(proposals = [], input = {}) {
+  const ids = new Set([
+    ...normalizeArray(input.proposalId || input.proposalIds),
+    ...normalizeArray(input.candidateId || input.candidateIds)
+  ].map((id) => String(id)));
+  if (!ids.size) return proposals;
+  return proposals.filter((proposal) => ids.has(proposal.proposalId) || ids.has(proposal.id));
+}
+
+function executeConsolidationV2Proposal(projectDir, proposal = {}, input = {}) {
+  const reason = input.reason || `Consolidation V2 ${proposal.operation}`;
+  if (proposal.operation === "add") {
+    const result = addMemory(projectDir, {
+      type: proposal.type,
+      title: proposal.title,
+      content: proposal.content,
+      sourceRefs: proposal.sourceRefs,
+      files: proposal.files,
+      concepts: [...new Set([...(proposal.concepts || []), "consolidation-v2"])],
+      goalId: proposal.goalId,
+      agentId: proposal.agentId || input.agentId,
+      confidence: proposal.confidence,
+      importance: proposal.importance,
+      createdAt: proposal.observedAt || undefined,
+      consolidation: {
+        schemaVersion: "project-agent.memory-consolidation-v2-source.v1",
+        candidateId: proposal.id,
+        proposalId: proposal.proposalId,
+        hash: proposal.hash || candidateHash(proposal),
+        operation: proposal.operation,
+        source: proposal.source,
+        semanticSignals: proposal.semanticSignals
+      }
+    });
+    return { proposalId: proposal.proposalId, operation: "add", id: result.record.id, ref: result.ref, auditRef: result.auditRef };
+  }
+  if (proposal.operation === "update" && proposal.matchedRecord?.ref) {
+    const existing = proposal.matchedRecord;
+    const result = updateMemory(projectDir, {
+      ref: existing.ref,
+      reason,
+      content: proposal.content,
+      sourceRefs: [...new Set([...(proposal.sourceRefs || []), existing.ref])],
+      files: proposal.files || [],
+      concepts: [...new Set([...(proposal.concepts || []), "consolidation-v2"])],
+      confidence: proposal.confidence,
+      importance: proposal.importance
+    });
+    return { proposalId: proposal.proposalId, operation: "update", id: result.record.id, ref: result.ref, auditRef: result.auditRef };
+  }
+  if (proposal.operation === "supersede" && proposal.matchedRecord?.ref) {
+    const result = supersedeMemory(projectDir, {
+      ref: proposal.matchedRecord.ref,
+      dryRun: false,
+      reason,
+      type: proposal.type,
+      title: proposal.title,
+      content: proposal.content,
+      sourceRefs: proposal.sourceRefs,
+      files: proposal.files,
+      concepts: [...new Set([...(proposal.concepts || []), "consolidation-v2"])],
+      confidence: proposal.confidence,
+      importance: proposal.importance,
+      agentId: proposal.agentId || input.agentId
+    });
+    return { proposalId: proposal.proposalId, operation: "supersede", id: result.record.id, ref: result.ref, oldRef: result.oldRecord?.ref, auditRef: result.auditRef };
+  }
+  if (proposal.operation === "expire" && proposal.matchedRecord?.ref) {
+    const result = forgetMemory(projectDir, {
+      ref: proposal.matchedRecord.ref,
+      mode: "expire",
+      dryRun: false,
+      reason
+    });
+    return { proposalId: proposal.proposalId, operation: "expire", ref: proposal.matchedRecord.ref, auditRef: result.auditRef };
+  }
+  return { proposalId: proposal.proposalId, operation: proposal.operation, skipped: true, reason: "No executable operation or matched record." };
+}
+
+export function consolidateMemoryV2(projectDir, input = {}) {
+  const root = stateDir(projectDir);
+  if (!existsSync(root) || !existsSync(path.join(root, "state.json"))) {
+    return {
+      schemaVersion: "project-agent.memory-consolidation-v2.v1",
+      ok: true,
+      status: "not_started",
+      dryRun: true,
+      projectDir,
+      generatedAt: nowIso(),
+      summary: "Project has not been started; no memory consolidation v2 proposals are available.",
+      proposals: [],
+      executed: [],
+      skipped: [],
+      totals: { proposals: 0, add: 0, update: 0, supersede: 0, expire: 0, skip: 0 },
+      refs: []
+    };
+  }
+  ensureMemoryStore(projectDir, { audit: false });
+  const mode = normalizeConsolidationMode(input.mode || (input.dryRun === false ? "session" : "dryRun"));
+  const dryRun = input.dryRun !== false || mode === "dryRun";
+  const rawCandidates = allConsolidationCandidates(projectDir, { ...input, mode });
+  const annotated = annotateConsolidationCandidates(projectDir, rawCandidates, input);
+  const records = readAllMemory(projectDir).records;
+  const proposals = [
+    ...annotated.map((candidate) => consolidationV2Proposal(projectDir, candidate, records, input)),
+    ...consolidationV2RetentionProposals(projectDir, input)
+  ].sort((a, b) =>
+    (a.operation === "skip") - (b.operation === "skip") ||
+    Number(b.importance || 0) - Number(a.importance || 0) ||
+    Number(b.confidence || 0) - Number(a.confidence || 0) ||
+    String(b.observedAt || "").localeCompare(String(a.observedAt || ""))
+  );
+  const limit = Math.max(1, Math.min(120, Number(input.limit || 20)));
+  const limited = proposals.slice(0, limit);
+  const selected = selectedConsolidationV2Proposals(limited, input);
+  if (!dryRun && mode === "manual" && !normalizeArray(input.proposalId || input.proposalIds || input.candidateId || input.candidateIds).length) {
+    const error = new Error("Manual consolidation v2 execution requires proposalId/proposalIds or candidateId/candidateIds.");
+    error.status = 400;
+    throw error;
+  }
+  const executable = selected.filter((proposal) => proposal.v2Status === "ready" && proposal.operation !== "skip");
+  const skipped = selected
+    .filter((proposal) => proposal.v2Status !== "ready" || proposal.operation === "skip")
+    .map((proposal) => ({
+      proposalId: proposal.proposalId,
+      candidateId: proposal.id,
+      operation: proposal.operation,
+      status: proposal.v2Status,
+      reason: proposal.reason,
+      matchedRecord: proposal.matchedRecord || null
+    }));
+  const totals = {
+    proposals: limited.length,
+    ready: limited.filter((proposal) => proposal.v2Status === "ready" && proposal.operation !== "skip").length,
+    add: limited.filter((proposal) => proposal.operation === "add").length,
+    update: limited.filter((proposal) => proposal.operation === "update").length,
+    supersede: limited.filter((proposal) => proposal.operation === "supersede").length,
+    expire: limited.filter((proposal) => proposal.operation === "expire").length,
+    skip: limited.filter((proposal) => proposal.operation === "skip").length,
+    selected: selected.length,
+    executable: executable.length
+  };
+  if (dryRun) {
+    return {
+      schemaVersion: "project-agent.memory-consolidation-v2.v1",
+      ok: true,
+      status: "dry_run",
+      dryRun: true,
+      mode,
+      projectDir,
+      generatedAt: nowIso(),
+      summary: `Consolidation V2 found ${limited.length} proposal(s): ${totals.add} add, ${totals.update} update, ${totals.supersede} supersede, ${totals.expire} expire, ${totals.skip} skip.`,
+      engine: {
+        proposalModel: "semantic-signals-lite",
+        embeddingProvider: process.env.CLI_MEMO_MEMORY_EMBEDDER || "none",
+        astProvider: "none"
+      },
+      proposals: limited,
+      executed: [],
+      skipped,
+      totals,
+      refs: [".project-agent/runtime.json", ".project-agent/memory/retention.json", ".project-agent/memory/index.md"]
+    };
+  }
+  const executed = [];
+  for (const proposal of executable) {
+    executed.push(executeConsolidationV2Proposal(projectDir, proposal, input));
+  }
+  const refresh = executed.length ? rebuildAllMemoryIndexes(projectDir, { audit: false }) : null;
+  const audit = appendAudit(projectDir, "memory_consolidated_v2", {
+    mode,
+    dryRun: false,
+    summary: `Consolidation V2 executed ${executed.length} proposal(s); skipped ${skipped.length}.`,
+    executed,
+    skipped,
+    refs: [...executed.map((item) => item.ref), ...skipped.map((item) => item.matchedRecord?.ref).filter(Boolean)].slice(0, 40)
+  });
+  return {
+    schemaVersion: "project-agent.memory-consolidation-v2.v1",
+    ok: true,
+    status: executed.length ? "ok" : skipped.length ? "idempotent" : "empty",
+    dryRun: false,
+    mode,
+    projectDir,
+    generatedAt: nowIso(),
+    summary: executed.length
+      ? `Executed ${executed.length} consolidation v2 proposal(s); skipped ${skipped.length}.`
+      : "No consolidation v2 proposals were executed.",
+    engine: {
+      proposalModel: "semantic-signals-lite",
+      embeddingProvider: process.env.CLI_MEMO_MEMORY_EMBEDDER || "none",
+      astProvider: "none"
+    },
+    proposals: limited,
+    executed,
+    skipped,
+    auditRef: `.project-agent/memory/audit.jsonl#${audit.id}`,
+    totals: {
+      ...totals,
+      executed: executed.length,
+      skipped: skipped.length
+    },
+    refresh,
+    refs: [".project-agent/memory/audit.jsonl", ...executed.map((item) => item.ref).filter(Boolean)].slice(0, 40)
+  };
+}
+
 function harnessQuery(projectDir, input = {}) {
   const state = readJsonFile(path.join(stateDir(projectDir), "state.json"), {});
   const runtime = readJsonFile(path.join(stateDir(projectDir), "runtime.json"), {});
@@ -3131,6 +4053,14 @@ function harnessQuery(projectDir, input = {}) {
   const activeGoal = state.activeGoal || goals.find((goal) => goal.id === state.activeGoalId || goal.status === "active") || {};
   const recentEvents = (runtime.events || []).slice(0, 6);
   const changedFiles = (architecture.recentChanges || architecture.changes || []).slice(0, 8).map((file) => file.path || file.file).filter(Boolean);
+  if (String(input.query || "").trim()) {
+    return compact([
+      input.query,
+      activeGoal.objective,
+      takeover.activeGoal?.objective,
+      ...changedFiles
+    ].filter(Boolean).join(" "), 1200);
+  }
   return compact([
     input.query,
     activeGoal.objective,
@@ -3144,9 +4074,14 @@ function harnessQuery(projectDir, input = {}) {
   ].filter(Boolean).join(" "), 1200);
 }
 
-function harnessReadPayload(projectDir, result) {
+function harnessReadPayload(projectDir, result, input = {}) {
   try {
-    const read = readMemory(projectDir, { ref: result.refs?.[0] || result.id });
+    const read = readMemory(projectDir, {
+      ref: result.refs?.[0] || result.id,
+      auditAccess: input.auditAccess !== false,
+      accessActor: input.agentId || "project_memory_harness",
+      accessTool: "project_memory_harness"
+    });
     return {
       id: read.record.id,
       type: read.record.type,
@@ -3155,7 +4090,8 @@ function harnessReadPayload(projectDir, result) {
       sourceRefs: read.sourceRefs,
       confidence: read.record.confidence,
       importance: read.record.importance,
-      snippet: compact(read.record.content, 280)
+      snippet: compact(read.record.content, 280),
+      accessAudit: read.accessAudit || null
     };
   } catch {
     return null;
@@ -3212,11 +4148,14 @@ export function buildMemoryHarness(projectDir, input = {}) {
     sourceQuality: input.sourceQuality || undefined,
     latestOnly: input.latestOnly,
     useIndex,
-    limit
+    limit,
+    auditAccess: input.auditAccess !== false,
+    accessActor: input.agentId || "project_memory_harness",
+    accessTool: "project_memory_harness"
   });
   const autoReads = (search.results || [])
     .slice(0, maxReads)
-    .map((result) => harnessReadPayload(projectDir, result))
+    .map((result) => harnessReadPayload(projectDir, result, input))
     .filter(Boolean);
   const consolidation = input.consolidate === false
     ? null
@@ -3228,8 +4167,20 @@ export function buildMemoryHarness(projectDir, input = {}) {
         eventLimit: input.eventLimit || 20,
         minConfidence: input.minConfidence
       });
+  const consolidationV2 = input.consolidateV2 === false
+    ? null
+    : consolidateMemoryV2(projectDir, {
+        mode: input.consolidationMode || (input.goalId ? "goal" : "session"),
+        dryRun: true,
+        goalId: input.goalId || undefined,
+        limit: input.v2CandidateLimit || input.candidateLimit || 5,
+        eventLimit: input.eventLimit || 20,
+        minConfidence: input.minConfidence,
+        includeRetention: true
+      });
   const dogfood = dogfoodSeedPlan(projectDir);
   const retention = auditMemoryRetention(projectDir, { limit: input.retentionLimit || 5, audit: false });
+  const accessAudit = queryMemoryAccessAudit(projectDir, { limit: input.accessLimit || 8 });
   const appliedCalls = [
     {
       tool: "project_memory_search",
@@ -3242,13 +4193,14 @@ export function buildMemoryHarness(projectDir, input = {}) {
         folder: input.folder || undefined,
         concept: input.concept || undefined,
         sourceQuality: input.sourceQuality || undefined,
-        useIndex
+        useIndex,
+        auditAccess: input.auditAccess !== false
       }
     },
     ...autoReads.map((read) => ({
       tool: "project_memory_read",
       reason: "Harness auto-read a top canonical memory result so the agent does not need to manually choose refs.",
-      arguments: { ref: read.ref }
+      arguments: { ref: read.ref, auditAccess: input.auditAccess !== false }
     })),
     ...(consolidation ? [{
       tool: "project_memory_consolidate",
@@ -3258,6 +4210,17 @@ export function buildMemoryHarness(projectDir, input = {}) {
         dryRun: true,
         limit: input.candidateLimit || 5,
         goalId: input.goalId || undefined
+      }
+    }] : []),
+    ...(consolidationV2 ? [{
+      tool: "project_memory_consolidate_v2",
+      reason: "Harness auto-ran governed add/update/supersede/expire proposal discovery without mutating canonical memory.",
+      arguments: {
+        mode: consolidationV2.mode,
+        dryRun: true,
+        limit: input.v2CandidateLimit || input.candidateLimit || 5,
+        goalId: input.goalId || undefined,
+        includeRetention: true
       }
     }] : []),
     {
@@ -3270,18 +4233,19 @@ export function buildMemoryHarness(projectDir, input = {}) {
     }
   ];
   const readyConsolidation = consolidation?.totals?.ready || 0;
+  const readyConsolidationV2 = consolidationV2?.totals?.ready || 0;
   const dogfoodNeedsSeed = dogfood.status === "empty" || dogfood.status === "incomplete";
   const retentionNeedsSweep = Number(retention.totals?.actionable || 0) > 0;
   return {
     schemaVersion: "project-agent.memory-harness.v1",
     ok: true,
-    status: autoReads.length || readyConsolidation || dogfoodNeedsSeed || retentionNeedsSweep ? "ready" : "watch",
+    status: autoReads.length || readyConsolidation || readyConsolidationV2 || dogfoodNeedsSeed || retentionNeedsSweep ? "ready" : "watch",
     automatic: true,
     projectDir,
     generatedAt: nowIso(),
     summary: autoReads.length
-      ? `Harness auto-read ${autoReads.length} canonical memory record(s), found ${readyConsolidation} consolidation candidate(s), and checked lifecycle hygiene.`
-      : `Harness found ${search.results?.length || 0} search hit(s), ${readyConsolidation} consolidation candidate(s), and ${retention.totals?.actionable || 0} retention action(s).`,
+      ? `Harness auto-read ${autoReads.length} canonical memory record(s), found ${readyConsolidation} classic and ${readyConsolidationV2} v2 proposal(s), and checked lifecycle hygiene.`
+      : `Harness found ${search.results?.length || 0} search hit(s), ${readyConsolidation} classic proposal(s), ${readyConsolidationV2} v2 proposal(s), and ${retention.totals?.actionable || 0} retention action(s).`,
     query,
     appliedCalls,
     search: {
@@ -3299,6 +4263,14 @@ export function buildMemoryHarness(projectDir, input = {}) {
           candidates: (consolidation.candidates || []).slice(0, input.candidateLimit || 5)
         }
       : null,
+    consolidationV2: consolidationV2
+      ? {
+          status: consolidationV2.status,
+          mode: consolidationV2.mode,
+          totals: consolidationV2.totals,
+          proposals: (consolidationV2.proposals || []).slice(0, input.v2CandidateLimit || input.candidateLimit || 5)
+        }
+      : null,
     lifecycle: {
       dogfood,
       retention: {
@@ -3306,13 +4278,19 @@ export function buildMemoryHarness(projectDir, input = {}) {
         summary: retention.summary,
         totals: retention.totals,
         candidates: (retention.candidates || []).slice(0, 5)
+      },
+      accessAudit: {
+        status: accessAudit.status,
+        totals: accessAudit.totals,
+        refs: accessAudit.refs?.slice(0, 5) || []
       }
     },
     nextCalls: [
       ...(autoReads.length ? [] : [{ tool: "project_memory_search", arguments: { query, limit }, reason: "No auto-read results were available; broaden or refine query." }]),
       ...(dogfoodNeedsSeed ? [{ tool: "project_memory_seed_dogfood", arguments: { dryRun: false }, reason: "Durable dogfood memory is empty or incomplete and can be seeded idempotently from product benchmark docs." }] : []),
       ...(retentionNeedsSweep ? [{ tool: "project_memory_retention_sweep", arguments: { dryRun: false }, reason: "Retention audit found expired canonical memory that can be marked non-latest by policy." }] : []),
-      ...(readyConsolidation ? [{ tool: "project_memory_consolidate", arguments: { mode: consolidation.mode, dryRun: false, limit: input.candidateLimit || 5 }, reason: "Optional governed write: promote ready runtime candidates when durable memory update is intended." }] : [])
+      ...(readyConsolidation ? [{ tool: "project_memory_consolidate", arguments: { mode: consolidation.mode, dryRun: false, limit: input.candidateLimit || 5 }, reason: "Optional governed write: promote ready runtime candidates when durable memory update is intended." }] : []),
+      ...(readyConsolidationV2 ? [{ tool: "project_memory_consolidate_v2", arguments: { mode: consolidationV2.mode, dryRun: true, limit: input.v2CandidateLimit || input.candidateLimit || 5 }, reason: "Inspect governed add/update/supersede/expire proposals before choosing explicit v2 execution." }] : [])
     ],
     refs: [
       ".project-agent/memory/index.md",
@@ -3398,6 +4376,14 @@ export function readMemory(projectDir, input = {}) {
     error.status = 404;
     throw error;
   }
+  const access = recordMemoryAccess(projectDir, "memory_read_accessed", {
+    target,
+    memoryId: record.id,
+    memoryType: record.type,
+    title: record.title,
+    refs: [record.ref, ...(record.sourceRefs || [])].slice(0, 12),
+    summary: `Read ${record.type} memory ${record.id}.`
+  }, input);
   return {
     ok: true,
     record,
@@ -3409,7 +4395,8 @@ export function readMemory(projectDir, input = {}) {
       confidence: record.confidence,
       validFrom: record.validFrom,
       validUntil: record.validUntil
-    }
+    },
+    accessAudit: compactAccessRef(access)
   };
 }
 
@@ -3710,6 +4697,15 @@ export function searchMemory(projectDir, input = {}) {
     .sort((a, b) => b.score - a.score || String(b.record.updatedAt || "").localeCompare(String(a.record.updatedAt || "")))
     .slice(0, limit);
   const appliedFilters = visibleSearchFilters(filters);
+  const resultRefs = records.flatMap(({ record }) => [record.ref, ...(record.sourceRefs || [])]).filter(Boolean).slice(0, 16);
+  const access = recordMemoryAccess(projectDir, "memory_search_accessed", {
+    query,
+    filters: appliedFilters,
+    returned: records.length,
+    selectedRefs: resultRefs,
+    refs: [MEMORY_ACCESS_AUDIT_REF, ...resultRefs].slice(0, 16),
+    summary: `Searched canonical memory and returned ${records.length} result(s).`
+  }, input);
   return {
     schemaVersion: "project-agent.memory-search.v1",
     ok: true,
@@ -3773,7 +4769,8 @@ export function searchMemory(projectDir, input = {}) {
       filteredOut,
       terms,
       refs: CANONICAL_FILES.map((file) => `.project-agent/memory/${file}`)
-    }
+    },
+    accessAudit: compactAccessRef(access)
   };
 }
 

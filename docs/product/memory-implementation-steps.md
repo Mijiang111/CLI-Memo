@@ -16,7 +16,7 @@ It does not yet have canonical long-term memory. It cannot fully answer:
 
 The next memory work should therefore build a grep-first, file-native canonical memory layer before adding smarter retrieval.
 
-Update, 2026-06-15: the canonical layer exists. The current P0 focus is lifecycle closure: seed useful dogfood memory, update and supersede existing memory through first-class APIs, audit/sweep retention policy, and keep rebuildable indexes fresh after every canonical write.
+Update, 2026-06-15: the canonical layer and P0 lifecycle closure exist. The current P1/P2 tranche adds control-plane quality gates: rebuild all indexes from canonical memory, audit privacy/provenance policy, clean rebuildable generated state, record bounded harness read/search access, and produce governed Consolidation V2 add/update/supersede/expire proposals.
 
 ## Architecture Decision
 
@@ -86,6 +86,7 @@ UI testing: `npm run build`, `npm test`, and Browser QA passed. Desktop verified
     evidence.jsonl
     risks.jsonl
     audit.jsonl
+    access.jsonl
     retention.json
   generated/
     takeover-summary.json
@@ -101,6 +102,16 @@ UI testing: `npm run build`, `npm test`, and Browser QA passed. Desktop verified
 ```
 
 Migration note: existing root-level generated files can stay where they are in the first implementation. The `generated/` directory is the target cleanup after the canonical store is working.
+
+## Roadmap Execution Note: P1/P2 Memory Quality, 2026-06-15
+
+Benchmark / need analysis: after P0, the remaining gap was not storage. It was operational trust: agents need to know whether indexes are fresh, whether memory contains secret-like or weakly sourced claims, whether generated files can be safely cleaned, and which memory records were automatically injected by the harness.
+
+Architecture / best code: keep canonical JSONL as source of truth and make every smarter layer rebuildable or inspectable. `project_memory_rebuild_all_indexes` rebuilds `index.md`, BM25, entity, and lexical-vector caches. `project_memory_privacy_audit` scans canonical records and bounded state files for policy findings. `project_memory_generated_cleanup` defaults to dry-run and protects active handoff files unless explicitly targeted. `project_memory_access_audit` stores bounded `access.jsonl` rows for harness search/read calls. `project_memory_consolidate_v2` stays proposal-first and local: it uses semantic-signals-lite matching and retention policy, while provider-backed embeddings remain future-gated.
+
+Deployment: MCP exposes the five P1/P2 memory tools; HTTP mirrors them through `/api/memory/indexes/rebuild-all`, `/api/memory/privacy`, `/api/memory/generated-cleanup`, `/api/memory/consolidate-v2`, and `/api/memory/access-audit`. The Memory UI shows Privacy, Access, V2, Cleanup, Rebuild all, and Preview cleanup surfaces.
+
+UI testing: `npm test` verifies MCP and HTTP coverage for rebuild-all, privacy audit, generated cleanup dry-run/execution, V2 retention proposals, bounded access audit rows, code search, agent doctor, and UI source markers.
 
 ## Step 1: `project_memory_inventory`
 

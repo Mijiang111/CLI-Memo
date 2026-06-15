@@ -8,19 +8,26 @@ import { buildArchitecture } from "./architecture.js";
 import { buildContinuityAudit, writeContinuityAudit } from "./continuity-audit.js";
 import { defaultContextQuery, readContextRef, searchContext } from "./grep-context.js";
 import { buildInsights } from "./insights.js";
+import { buildAgentDoctor } from "./agent-doctor.js";
+import { searchCodeGraph } from "./code-search.js";
 import {
   addMemory,
+  auditMemoryPrivacy,
   auditMemoryRetention,
   buildMemoryInventory,
   buildMemoryHarness,
+  cleanupGeneratedMemoryState,
   consolidateMemory,
+  consolidateMemoryV2,
   ensureMemoryStore,
   forgetMemory,
   inspectMemoryEntityIndex,
   inspectMemorySearchIndex,
   memoryStoreRefs,
+  queryMemoryAccessAudit,
   queryMemoryAudit,
   readMemory,
+  rebuildAllMemoryIndexes,
   rebuildMemoryEntityIndex,
   rebuildMemorySearchIndex,
   rebuildMemoryVectorIndex,
@@ -753,6 +760,32 @@ function registerProjectTools(server) {
   );
 
   server.registerTool(
+    "project_code_search",
+    {
+      title: "Project Code Search",
+      description: "Search the local symbol/import graph for files, symbols, dependents, tests, and read-before-edit refs.",
+      inputSchema: {
+        ...ProjectDirSchema,
+        query: z.string().optional(),
+        file: z.string().optional(),
+        symbol: z.string().optional(),
+        symbolKind: z.enum(["function", "class", "value", "reexport"]).optional(),
+        language: z.string().optional(),
+        limit: z.number().int().min(1).max(50).optional(),
+        persist: z.boolean().optional().describe("Persist the architecture snapshot while searching. Defaults to false.")
+      }
+    },
+    async (input) => {
+      try {
+        const projectDir = resolveProjectDir(input);
+        return toolResult(searchCodeGraph(projectDir, input));
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
     "project_handoff_audit",
     {
       title: "Project Handoff Audit",
@@ -848,6 +881,29 @@ function registerProjectTools(server) {
           sourceRefs: takeoverSummary.sourceRefs || []
         };
         return toolResult(audit);
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "project_agent_doctor",
+    {
+      title: "Project Agent Doctor",
+      description: "Run an external-agent readiness doctor for bootstrap, automatic memory harness, indexes, privacy, access audit, and code search.",
+      inputSchema: {
+        ...ProjectDirSchema,
+        query: z.string().optional(),
+        bindHost: z.string().optional(),
+        apiPort: z.number().int().min(1).max(65535).optional(),
+        uiPort: z.number().int().min(1).max(65535).optional()
+      }
+    },
+    async (input) => {
+      try {
+        const projectDir = resolveProjectDir(input);
+        return toolResult(buildAgentDoctor(projectDir, input));
       } catch (error) {
         return toolError(error);
       }
@@ -956,7 +1012,8 @@ function registerProjectTools(server) {
       inputSchema: {
         ...ProjectDirSchema,
         id: z.string().optional(),
-        ref: z.string().optional()
+        ref: z.string().optional(),
+        auditAccess: z.boolean().optional().describe("Record this read in bounded access audit.")
       }
     },
     async (input) => {
@@ -1115,7 +1172,8 @@ function registerProjectTools(server) {
         sourceQuality: z.enum(["strong", "watch", "weak"]).optional(),
         latestOnly: z.boolean().optional(),
         useIndex: z.enum(["bm25", "entity", "vector", "hybrid"]).optional().describe("Use a fresh optional rebuildable search cache. Falls back to deterministic grep-first when missing or stale."),
-        limit: z.number().int().min(1).max(50).optional()
+        limit: z.number().int().min(1).max(50).optional(),
+        auditAccess: z.boolean().optional().describe("Record this search in bounded access audit.")
       }
     },
     async (input) => {
@@ -1182,6 +1240,26 @@ function registerProjectTools(server) {
       try {
         const projectDir = resolveProjectDir(input);
         return toolResult(rebuildMemoryVectorIndex(projectDir, input));
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "project_memory_rebuild_all_indexes",
+    {
+      title: "Project Memory Rebuild All Indexes",
+      description: "Rebuild canonical memory index.md plus BM25, entity, and lexical-vector caches from source JSONL memory.",
+      inputSchema: {
+        ...ProjectDirSchema,
+        audit: z.boolean().optional().describe("Append a memory audit row. Defaults to true.")
+      }
+    },
+    async (input) => {
+      try {
+        const projectDir = resolveProjectDir(input);
+        return toolResult(rebuildAllMemoryIndexes(projectDir, input));
       } catch (error) {
         return toolError(error);
       }
@@ -1315,6 +1393,78 @@ function registerProjectTools(server) {
   );
 
   server.registerTool(
+    "project_memory_privacy_audit",
+    {
+      title: "Project Memory Privacy Audit",
+      description: "Scan canonical memory and bounded project-agent state for secret-like text, weak provenance, raw architecture text policy, and writer audit gaps.",
+      inputSchema: {
+        ...ProjectDirSchema,
+        limit: z.number().int().min(1).max(100).optional(),
+        maxFileBytes: z.number().int().min(1024).max(1048576).optional(),
+        audit: z.boolean().optional().describe("Append a non-mutating audit row. Defaults to false.")
+      }
+    },
+    async (input) => {
+      try {
+        const projectDir = resolveProjectDir(input);
+        return toolResult(auditMemoryPrivacy(projectDir, input));
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "project_memory_generated_cleanup",
+    {
+      title: "Project Memory Generated Cleanup",
+      description: "Dry-run or remove rebuildable generated/index files, then rebuild memory indexes from canonical memory.",
+      inputSchema: {
+        ...ProjectDirSchema,
+        dryRun: z.boolean().optional().describe("Defaults to true. Set false to remove matching rebuildable files."),
+        mode: z.enum(["overLimit", "rebuildable", "indexes"]).optional(),
+        ref: z.string().optional(),
+        refs: z.array(z.string()).optional(),
+        maxBytes: z.number().int().min(0).optional(),
+        includeIndexes: z.boolean().optional(),
+        rebuildIndexes: z.boolean().optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+        audit: z.boolean().optional().describe("Append an audit row. Defaults to true."),
+        role: z.string().optional().describe("Role used when refreshing generated project context after executed cleanup. Defaults to coding_agent.")
+      }
+    },
+    async (input) => {
+      try {
+        const projectDir = resolveProjectDir(input);
+        const result = cleanupGeneratedMemoryState(projectDir, input);
+        if (!result.dryRun) {
+          const refresh = await refreshProjectState(projectDir, { role: input.role || "coding_agent" });
+          return toolResult({
+            ...result,
+            refreshed: true,
+            refreshSummary: {
+              lifecycle: projectLifecycle(projectDir, {
+                summary: refresh.summary,
+                continuity: refresh.continuity,
+                verification: refresh.verification
+              }),
+              verification: refresh.verification,
+              takeoverSummary: refresh.takeoverSummary ? decorateTakeoverSummary(refresh.takeoverSummary, projectLifecycle(projectDir, {
+                summary: refresh.summary,
+                continuity: refresh.continuity,
+                verification: refresh.verification
+              })) : null
+            }
+          });
+        }
+        return toolResult(result);
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
     "project_memory_harness",
     {
       title: "Project Memory Harness",
@@ -1339,7 +1489,10 @@ function registerProjectTools(server) {
         retentionLimit: z.number().int().min(1).max(200).optional(),
         minConfidence: z.number().min(0).max(1).optional(),
         consolidate: z.boolean().optional(),
-        consolidationMode: z.enum(["dryRun", "manual", "goal", "session", "project"]).optional()
+        consolidateV2: z.boolean().optional(),
+        consolidationMode: z.enum(["dryRun", "manual", "goal", "session", "project"]).optional(),
+        v2CandidateLimit: z.number().int().min(1).max(20).optional(),
+        auditAccess: z.boolean().optional()
       }
     },
     async (input) => {
@@ -1404,6 +1557,64 @@ function registerProjectTools(server) {
   );
 
   server.registerTool(
+    "project_memory_consolidate_v2",
+    {
+      title: "Project Memory Consolidate V2",
+      description: "Dry-run or execute governed add/update/supersede/expire proposals using local semantic signals and retention policy.",
+      inputSchema: {
+        ...ProjectDirSchema,
+        mode: z.enum(["dryRun", "manual", "goal", "session", "project"]).optional(),
+        dryRun: z.boolean().optional().describe("Defaults to true. Set false only with explicit proposal/candidate ids."),
+        proposalId: z.string().optional(),
+        proposalIds: z.array(z.string()).optional(),
+        candidateId: z.string().optional(),
+        candidateIds: z.array(z.string()).optional(),
+        goalId: z.string().optional(),
+        since: z.string().optional(),
+        until: z.string().optional(),
+        limit: z.number().int().min(1).max(120).optional(),
+        eventLimit: z.number().int().min(1).max(120).optional(),
+        retentionLimit: z.number().int().min(1).max(200).optional(),
+        minConfidence: z.number().min(0).max(1).optional(),
+        includeRetention: z.boolean().optional(),
+        preferSupersede: z.boolean().optional(),
+        reason: z.string().optional(),
+        agentId: z.string().optional(),
+        role: z.string().optional().describe("Role used when refreshing project context after executed mutation. Defaults to coding_agent.")
+      }
+    },
+    async (input) => {
+      try {
+        const projectDir = resolveProjectDir(input);
+        const result = consolidateMemoryV2(projectDir, input);
+        if (!result.dryRun) {
+          const refresh = await refreshProjectState(projectDir, { role: input.role || "coding_agent" });
+          return toolResult({
+            ...result,
+            refreshed: true,
+            refreshSummary: {
+              lifecycle: projectLifecycle(projectDir, {
+                summary: refresh.summary,
+                continuity: refresh.continuity,
+                verification: refresh.verification
+              }),
+              verification: refresh.verification,
+              takeoverSummary: refresh.takeoverSummary ? decorateTakeoverSummary(refresh.takeoverSummary, projectLifecycle(projectDir, {
+                summary: refresh.summary,
+                continuity: refresh.continuity,
+                verification: refresh.verification
+              })) : null
+            }
+          });
+        }
+        return toolResult(result);
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
     "project_memory_audit",
     {
       title: "Project Memory Audit",
@@ -1425,6 +1636,33 @@ function registerProjectTools(server) {
       try {
         const projectDir = resolveProjectDir(input);
         return toolResult(queryMemoryAudit(projectDir, input));
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "project_memory_access_audit",
+    {
+      title: "Project Memory Access Audit",
+      description: "Query bounded canonical memory read/search access rows recorded by the automatic memory harness or explicit auditAccess calls.",
+      inputSchema: {
+        ...ProjectDirSchema,
+        action: z.string().optional(),
+        tool: z.string().optional(),
+        actor: z.string().optional(),
+        query: z.string().optional(),
+        ref: z.string().optional(),
+        since: z.string().optional(),
+        until: z.string().optional(),
+        limit: z.number().int().min(1).max(200).optional()
+      }
+    },
+    async (input) => {
+      try {
+        const projectDir = resolveProjectDir(input);
+        return toolResult(queryMemoryAccessAudit(projectDir, input));
       } catch (error) {
         return toolError(error);
       }

@@ -2965,7 +2965,24 @@ function GovernanceKernelPanel({
   );
 }
 
-function MemoryInventoryPanel({ inventory, search, audit, harness, consolidation, forgetPreview, onPreviewForget, onExecuteForget, onExecuteConsolidation, onSearchMemory }) {
+function MemoryInventoryPanel({
+  inventory,
+  search,
+  audit,
+  harness,
+  consolidation,
+  consolidationV2,
+  privacy,
+  accessAudit,
+  cleanupPreview,
+  forgetPreview,
+  onPreviewForget,
+  onExecuteForget,
+  onExecuteConsolidation,
+  onSearchMemory,
+  onRebuildMemoryIndexes,
+  onPreviewGeneratedCleanup
+}) {
   const [searchFilters, setSearchFilters] = useState(initialMemoryFiltersFromLocation);
   const [forgetConfirmed, setForgetConfirmed] = useState(false);
   const [consolidationConfirmed, setConsolidationConfirmed] = useState(false);
@@ -2983,9 +3000,15 @@ function MemoryInventoryPanel({ inventory, search, audit, harness, consolidation
   const actionCounts = audit?.totals?.actionCounts || {};
   const consolidationCandidates = consolidation?.candidates || [];
   const consolidationTotals = consolidation?.totals || {};
+  const consolidationV2Proposals = consolidationV2?.proposals || [];
+  const consolidationV2Totals = consolidationV2?.totals || {};
   const harnessReads = harness?.autoReads || [];
   const harnessCalls = harness?.appliedCalls || [];
   const harnessNextCalls = harness?.nextCalls || [];
+  const privacyFindings = privacy?.findings || [];
+  const accessEntries = accessAudit?.entries || [];
+  const cleanupCandidates = cleanupPreview?.candidates || [];
+  const cleanupBytes = cleanupCandidates.reduce((sum, item) => sum + Number(item.bytes || 0), 0);
   const riskyFiles = inventory.riskyFiles || [];
   const lifecycle = inventory.lifecycle || {};
   const dogfood = lifecycle.dogfood || {};
@@ -3008,6 +3031,8 @@ function MemoryInventoryPanel({ inventory, search, audit, harness, consolidation
   const canExecuteConsolidation = Boolean(consolidation?.dryRun && readyConsolidationCandidates.length && consolidationConfirmed);
   const dogfoodTone = dogfood.status === "seeded" ? "ok" : dogfood.status === "unavailable" ? "muted" : "warn";
   const retentionTone = Number(retention.totals?.actionable || 0) ? "warn" : retention.status === "ok" ? "ok" : "muted";
+  const privacyTone = privacy?.status === "ok" ? "ok" : privacy?.status === "watch" ? "warn" : privacy?.status ? "warn" : "muted";
+  const cleanupTone = cleanupCandidates.length ? "warn" : cleanupPreview?.status === "empty" ? "ok" : "muted";
   const updateSearchFilter = (key, value) => setSearchFilters((current) => ({ ...current, [key]: value }));
   const runSearchFromControls = (event) => {
     const panel = event.currentTarget.closest(".memory-search-panel");
@@ -3033,7 +3058,32 @@ function MemoryInventoryPanel({ inventory, search, audit, harness, consolidation
         <InsightCard icon={Brain} label="Vector" value={cleanLabel(vectorIndex.status || "missing")} detail={`${vectorIndex.statistics?.dimensions || vectorIndex.params?.dimensions || 0} dims · ${vectorIndex.embeddingProvider || "none"}`} tone={vectorIndex.status === "fresh" ? "ok" : vectorIndex.status === "missing" ? "muted" : "warn"} />
         <InsightCard icon={Sparkles} label="Dogfood" value={cleanLabel(dogfood.status || "unknown")} detail={`${dogfood.present || 0}/${dogfood.expected || 0} seeded`} tone={dogfoodTone} />
         <InsightCard icon={RefreshCw} label="Retention" value={String(retention.totals?.actionable || 0)} detail={`${retention.totals?.generatedOverLimit || 0} generated`} tone={retentionTone} />
+        <InsightCard icon={ShieldCheck} label="Privacy" value={cleanLabel(privacy?.status || "unknown")} detail={`${privacy?.totals?.high || 0} high · ${privacyFindings.length} shown`} tone={privacyTone} />
+        <InsightCard icon={Activity} label="Access" value={String(accessAudit?.totals?.entries || 0)} detail={accessEntries[0]?.action ? cleanLabel(accessEntries[0].action) : "bounded log"} tone={accessAudit?.status === "ok" || accessAudit?.status === "empty" ? "ok" : "muted"} />
+        <InsightCard icon={Sparkles} label="V2" value={String(consolidationV2Totals.ready || 0)} detail={`${consolidationV2Totals.update || 0} update · ${consolidationV2Totals.supersede || 0} supersede`} tone={(consolidationV2Totals.ready || 0) ? "warn" : "ok"} />
+        <InsightCard icon={RefreshCw} label="Cleanup" value={String(cleanupCandidates.length)} detail={formatBytes(cleanupBytes)} tone={cleanupTone} />
       </div>
+      <div className="memory-control-strip" data-memory-p1-p2="control-plane">
+        <button type="button" className="memory-preview-button" onClick={() => onRebuildMemoryIndexes?.()}>
+          <RefreshCw size={12} />
+          <span>Rebuild all</span>
+        </button>
+        <button type="button" className="memory-preview-button" onClick={() => onPreviewGeneratedCleanup?.()}>
+          <Eye size={12} />
+          <span>Preview cleanup</span>
+        </button>
+      </div>
+      {cleanupPreview ? (
+        <div className="memory-cleanup-preview">
+          <strong>{cleanupPreview.dryRun ? "Cleanup preview" : "Cleanup result"}</strong>
+          <span>{cleanupPreview.summary}</span>
+          <div>
+            <em>{cleanupCandidates.length} candidates</em>
+            <em>{formatBytes(cleanupBytes)}</em>
+            <em>{cleanLabel(cleanupPreview.status || "watch")}</em>
+          </div>
+        </div>
+      ) : null}
       {inventory.missingExpected?.length ? (
         <div className="memory-surface-list">
           {inventory.missingExpected.slice(0, 4).map((ref) => (
@@ -3145,6 +3195,8 @@ function MemoryInventoryPanel({ inventory, search, audit, harness, consolidation
           <div className="memory-lifecycle-strip">
             <em title={harnessDogfood.summary || dogfood.summary}>dogfood · {cleanLabel(harnessDogfood.status || "unknown")}</em>
             <em title={harnessRetention.summary || retention.summary}>retention · {harnessRetention.totals?.actionable || 0}</em>
+            <em title="Bounded read/search access audit">access · {harnessLifecycle.accessAudit?.totals?.entries || accessAudit?.totals?.entries || 0}</em>
+            <em title="Consolidation V2 governed proposals">v2 · {consolidationV2Totals.ready || 0}</em>
             {harnessNextCalls.slice(0, 3).map((call, index) => (
               <em key={`${call.tool}-${index}`} title={call.reason}>next · {call.tool}</em>
             ))}
@@ -3193,6 +3245,29 @@ function MemoryInventoryPanel({ inventory, search, audit, harness, consolidation
             </div>
           ))}
           {!consolidationCandidates.length ? <Empty title="No consolidation proposals" body="The harness will keep watching runtime, handoff, and architecture signals." /> : null}
+        </div>
+      ) : null}
+      {consolidationV2 ? (
+        <div className="memory-consolidation-panel" data-memory-consolidation-v2="governed-proposals">
+          <div className="memory-consolidation-head">
+            <strong>Consolidation V2</strong>
+            <span>{consolidationV2Totals.ready || 0}/{consolidationV2Totals.proposals || 0} ready</span>
+          </div>
+          <div className="memory-consolidation-counts">
+            <em>{consolidationV2Totals.add || 0} add</em>
+            <em>{consolidationV2Totals.update || 0} update</em>
+            <em>{consolidationV2Totals.supersede || 0} supersede</em>
+            <em>{consolidationV2Totals.expire || 0} expire</em>
+          </div>
+          {consolidationV2Proposals.slice(0, 5).map((proposal) => (
+            <div key={proposal.proposalId || proposal.id} className="memory-consolidation-row">
+              <div>
+                <strong title={proposal.title}>{proposal.title}</strong>
+                <span>{proposal.operation} · {cleanLabel(proposal.v2Status || proposal.status)} · {Math.round(Number(proposal.confidence || 0) * 100)}%</span>
+              </div>
+              <small title={proposal.reason}>{proposal.matchedRecord?.ref || proposal.sourceRefs?.[0] || proposal.reason}</small>
+            </div>
+          ))}
         </div>
       ) : null}
       {auditEntries.length ? (
@@ -4219,6 +4294,10 @@ function RunContextSidecar({
   memoryAudit,
   memoryHarness,
   memoryConsolidation,
+  memoryConsolidationV2,
+  memoryPrivacy,
+  memoryAccessAudit,
+  memoryCleanupPreview,
   memoryForgetPreview,
   projectLauncher,
   sandboxGuidance,
@@ -4242,6 +4321,8 @@ function RunContextSidecar({
   onExecuteMemoryForget,
   onExecuteMemoryConsolidation,
   onSearchMemory,
+  onRebuildMemoryIndexes,
+  onPreviewGeneratedCleanup,
   onStateImported,
   onRefreshProjects,
   canComplete,
@@ -4433,11 +4514,17 @@ function RunContextSidecar({
                 audit={memoryAudit}
                 harness={memoryHarness}
                 consolidation={memoryConsolidation}
+                consolidationV2={memoryConsolidationV2}
+                privacy={memoryPrivacy}
+                accessAudit={memoryAccessAudit}
+                cleanupPreview={memoryCleanupPreview}
                 forgetPreview={memoryForgetPreview}
                 onPreviewForget={onPreviewMemoryForget}
                 onExecuteForget={onExecuteMemoryForget}
                 onExecuteConsolidation={onExecuteMemoryConsolidation}
                 onSearchMemory={onSearchMemory}
+                onRebuildMemoryIndexes={onRebuildMemoryIndexes}
+                onPreviewGeneratedCleanup={onPreviewGeneratedCleanup}
               />
               <MemoryGraph graph={memoryGraph} />
             </>
@@ -4543,6 +4630,10 @@ function AgentStatePanel({
   memoryAudit,
   memoryHarness,
   memoryConsolidation,
+  memoryConsolidationV2,
+  memoryPrivacy,
+  memoryAccessAudit,
+  memoryCleanupPreview,
   memoryForgetPreview,
   projectLauncher,
   sandboxGuidance,
@@ -4559,6 +4650,8 @@ function AgentStatePanel({
   onExecuteMemoryForget,
   onExecuteMemoryConsolidation,
   onSearchMemory,
+  onRebuildMemoryIndexes,
+  onPreviewGeneratedCleanup,
   onStateImported,
   onRefreshProjects,
   onSaveCommand,
@@ -4613,6 +4706,10 @@ function AgentStatePanel({
       memoryAudit={memoryAudit}
       memoryHarness={memoryHarness}
       memoryConsolidation={memoryConsolidation}
+      memoryConsolidationV2={memoryConsolidationV2}
+      memoryPrivacy={memoryPrivacy}
+      memoryAccessAudit={memoryAccessAudit}
+      memoryCleanupPreview={memoryCleanupPreview}
       memoryForgetPreview={memoryForgetPreview}
       projectLauncher={projectLauncher}
       sandboxGuidance={sandboxGuidance}
@@ -4636,6 +4733,8 @@ function AgentStatePanel({
       onExecuteMemoryForget={onExecuteMemoryForget}
       onExecuteMemoryConsolidation={onExecuteMemoryConsolidation}
       onSearchMemory={onSearchMemory}
+      onRebuildMemoryIndexes={onRebuildMemoryIndexes}
+      onPreviewGeneratedCleanup={onPreviewGeneratedCleanup}
       onStateImported={onStateImported}
       onRefreshProjects={onRefreshProjects}
       canComplete={canComplete}
@@ -4882,6 +4981,10 @@ export default function App({ TerminalClass, FitAddonClass }) {
   const [memoryAudit, setMemoryAudit] = useState(null);
   const [memoryHarness, setMemoryHarness] = useState(null);
   const [memoryConsolidation, setMemoryConsolidation] = useState(null);
+  const [memoryConsolidationV2, setMemoryConsolidationV2] = useState(null);
+  const [memoryPrivacy, setMemoryPrivacy] = useState(null);
+  const [memoryAccessAudit, setMemoryAccessAudit] = useState(null);
+  const [memoryCleanupPreview, setMemoryCleanupPreview] = useState(null);
   const [memoryForgetPreview, setMemoryForgetPreview] = useState(null);
   const [projectLauncher, setProjectLauncher] = useState(null);
   const [sandboxGuidance, setSandboxGuidance] = useState(null);
@@ -4962,7 +5065,7 @@ export default function App({ TerminalClass, FitAddonClass }) {
         const query = new URLSearchParams({ role });
         if (selected) query.set("goal", selected);
         const memorySearchPath = memorySearchPathFromLocation();
-        const [nextPacket, nextInsights, nextMemoryInventory, nextMemorySearch, nextMemoryAudit, nextMemoryHarness, nextMemoryConsolidation, nextProjectLauncher, nextSandboxGuidance, nextAgentBootstrap] = await Promise.all([
+        const [nextPacket, nextInsights, nextMemoryInventory, nextMemorySearch, nextMemoryAudit, nextMemoryHarness, nextMemoryConsolidation, nextMemoryConsolidationV2, nextMemoryPrivacy, nextMemoryAccessAudit, nextMemoryCleanupPreview, nextProjectLauncher, nextSandboxGuidance, nextAgentBootstrap] = await Promise.all([
           api(`/kernel?${query.toString()}`),
           api(`/insights?${query.toString()}`),
           api("/memory/inventory"),
@@ -4970,6 +5073,10 @@ export default function App({ TerminalClass, FitAddonClass }) {
           api("/memory/audit?limit=5"),
           api("/memory/harness?limit=6&maxReads=3&candidateLimit=5"),
           api("/memory/consolidate?mode=session&limit=5"),
+          api("/memory/consolidate-v2?mode=session&limit=5"),
+          api("/memory/privacy?limit=8"),
+          api("/memory/access-audit?limit=5"),
+          api("/memory/generated-cleanup?mode=overLimit&limit=5"),
           api("/projects"),
           api("/security/sandbox"),
           api("/agent/bootstrap")
@@ -4980,6 +5087,10 @@ export default function App({ TerminalClass, FitAddonClass }) {
         setMemorySearch(nextMemorySearch);
         setMemoryAudit(nextMemoryAudit);
         setMemoryHarness(nextMemoryHarness);
+        setMemoryConsolidationV2(nextMemoryConsolidationV2);
+        setMemoryPrivacy(nextMemoryPrivacy);
+        setMemoryAccessAudit(nextMemoryAccessAudit);
+        setMemoryCleanupPreview(nextMemoryCleanupPreview);
         setProjectLauncher(nextProjectLauncher);
         setSandboxGuidance(nextSandboxGuidance);
         setAgentBootstrap(nextAgentBootstrap);
@@ -4991,11 +5102,15 @@ export default function App({ TerminalClass, FitAddonClass }) {
           setMemoryConsolidation(nextMemoryConsolidation);
         }
       } else {
-        const [nextInsights, nextMemoryInventory, nextMemoryAudit, nextMemoryHarness, nextMemoryConsolidation, nextProjectLauncher, nextSandboxGuidance, nextAgentBootstrap] = await Promise.all([api("/insights"), api("/memory/inventory"), api("/memory/audit?limit=5"), api("/memory/harness?limit=6&maxReads=3&candidateLimit=5"), api("/memory/consolidate?mode=session&limit=5"), api("/projects"), api("/security/sandbox"), api("/agent/bootstrap")]);
+        const [nextInsights, nextMemoryInventory, nextMemoryAudit, nextMemoryHarness, nextMemoryConsolidation, nextMemoryConsolidationV2, nextMemoryPrivacy, nextMemoryAccessAudit, nextMemoryCleanupPreview, nextProjectLauncher, nextSandboxGuidance, nextAgentBootstrap] = await Promise.all([api("/insights"), api("/memory/inventory"), api("/memory/audit?limit=5"), api("/memory/harness?limit=6&maxReads=3&candidateLimit=5"), api("/memory/consolidate?mode=session&limit=5"), api("/memory/consolidate-v2?mode=session&limit=5"), api("/memory/privacy?limit=8"), api("/memory/access-audit?limit=5"), api("/memory/generated-cleanup?mode=overLimit&limit=5"), api("/projects"), api("/security/sandbox"), api("/agent/bootstrap")]);
         setInsights(nextInsights);
         setMemoryInventory(nextMemoryInventory);
         setMemoryAudit(nextMemoryAudit);
         setMemoryHarness(nextMemoryHarness);
+        setMemoryConsolidationV2(nextMemoryConsolidationV2);
+        setMemoryPrivacy(nextMemoryPrivacy);
+        setMemoryAccessAudit(nextMemoryAccessAudit);
+        setMemoryCleanupPreview(nextMemoryCleanupPreview);
         setProjectLauncher(nextProjectLauncher);
         setSandboxGuidance(nextSandboxGuidance);
         setAgentBootstrap(nextAgentBootstrap);
@@ -5104,15 +5219,23 @@ export default function App({ TerminalClass, FitAddonClass }) {
       setMemoryForgetPreview(result);
     });
   const refreshMemorySideEffects = async ({ includeConsolidation = true } = {}) => {
-    const [nextMemoryInventory, nextMemoryAudit, nextMemoryHarness, nextMemoryConsolidation] = await Promise.all([
+    const [nextMemoryInventory, nextMemoryAudit, nextMemoryHarness, nextMemoryConsolidation, nextMemoryConsolidationV2, nextMemoryPrivacy, nextMemoryAccessAudit, nextMemoryCleanupPreview] = await Promise.all([
       api("/memory/inventory"),
       api("/memory/audit?limit=5"),
       api("/memory/harness?limit=6&maxReads=3&candidateLimit=5"),
-      includeConsolidation ? api("/memory/consolidate?mode=session&limit=5") : Promise.resolve(null)
+      includeConsolidation ? api("/memory/consolidate?mode=session&limit=5") : Promise.resolve(null),
+      api("/memory/consolidate-v2?mode=session&limit=5"),
+      api("/memory/privacy?limit=8"),
+      api("/memory/access-audit?limit=5"),
+      api("/memory/generated-cleanup?mode=overLimit&limit=5")
     ]);
     setMemoryInventory(nextMemoryInventory);
     setMemoryAudit(nextMemoryAudit);
     setMemoryHarness(nextMemoryHarness);
+    setMemoryConsolidationV2(nextMemoryConsolidationV2);
+    setMemoryPrivacy(nextMemoryPrivacy);
+    setMemoryAccessAudit(nextMemoryAccessAudit);
+    setMemoryCleanupPreview(nextMemoryCleanupPreview);
     if (includeConsolidation) setMemoryConsolidation(nextMemoryConsolidation);
   };
   const executeMemoryForget = async (preview = {}) => {
@@ -5158,6 +5281,37 @@ export default function App({ TerminalClass, FitAddonClass }) {
       consolidationExecutionRef.current = { result, until: Date.now() + 12000 };
       setMemoryConsolidation(result);
       await refreshMemorySideEffects({ includeConsolidation: false });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const rebuildMemoryIndexes = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await api("/memory/indexes/rebuild-all", { method: "POST", body: {} });
+      await refreshMemorySideEffects();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const previewGeneratedCleanup = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      setMemoryCleanupPreview(await api("/memory/generated-cleanup?mode=overLimit&limit=20"));
+      const [nextMemoryInventory, nextMemoryPrivacy, nextMemoryAccessAudit] = await Promise.all([
+        api("/memory/inventory"),
+        api("/memory/privacy?limit=8"),
+        api("/memory/access-audit?limit=5")
+      ]);
+      setMemoryInventory(nextMemoryInventory);
+      setMemoryPrivacy(nextMemoryPrivacy);
+      setMemoryAccessAudit(nextMemoryAccessAudit);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -5253,6 +5407,10 @@ export default function App({ TerminalClass, FitAddonClass }) {
           memoryAudit={memoryAudit}
           memoryHarness={memoryHarness}
           memoryConsolidation={memoryConsolidation}
+          memoryConsolidationV2={memoryConsolidationV2}
+          memoryPrivacy={memoryPrivacy}
+          memoryAccessAudit={memoryAccessAudit}
+          memoryCleanupPreview={memoryCleanupPreview}
           memoryForgetPreview={memoryForgetPreview}
           projectLauncher={projectLauncher}
           sandboxGuidance={sandboxGuidance}
@@ -5269,6 +5427,8 @@ export default function App({ TerminalClass, FitAddonClass }) {
           onExecuteMemoryForget={executeMemoryForget}
           onExecuteMemoryConsolidation={executeMemoryConsolidation}
           onSearchMemory={searchMemoryRecords}
+          onRebuildMemoryIndexes={rebuildMemoryIndexes}
+          onPreviewGeneratedCleanup={previewGeneratedCleanup}
           onStateImported={refreshAll}
           onRefreshProjects={refreshProjects}
           onSaveCommand={saveCommand}

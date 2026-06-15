@@ -20,7 +20,12 @@ Landed in this tranche:
 - Phase 3 audit query: `project_memory_audit`, `/api/memory/audit`, and sidecar audit timeline
 - Phase 3 step 5: `project_memory_consolidate` runtime-to-memory promotion with dry-run proposals, explicit execution, duplicate skipping, and low-confidence gating
 - Phase 3 P0 lifecycle closure: `project_memory_seed_dogfood`, `project_memory_update`, `project_memory_supersede`, `project_memory_retention_audit`, and `project_memory_retention_sweep`
+- Phase 3/4 P1 quality closure: `project_memory_rebuild_all_indexes`, `project_memory_privacy_audit`, `project_memory_generated_cleanup`, `project_memory_consolidate_v2`, and `project_memory_access_audit`
 - Cache cascade refresh: add/update/supersede/forget/consolidate/retention sweep refresh `index.md`, BM25, entity, and lexical-vector caches after canonical writes
+- Rebuild-all cache refresh: canonical `index.md`, BM25, entity, and lexical-vector caches can be rebuilt together through MCP and HTTP.
+- Bounded access audit: automatic harness search/read calls are recorded in `.project-agent/memory/access.jsonl` and queryable through MCP/HTTP.
+- Generated cleanup: rebuildable generated/index files are dry-run previewed, active handoff files are protected by default, and executed cleanup refreshes indexes/state manifest.
+- Consolidation V2: governed add/update/supersede/expire proposals are exposed without mutation, with retention-expiry proposals covered.
 - AI memory harness: automatic canonical memory search/read and non-mutating consolidation discovery attached to takeover/bootstrap flows
 - AI memory harness lifecycle: dogfood/retention status and governed next calls are returned without requiring users to inspect memory files manually
 - HTTP API and sidecar UI read path for canonical memory inventory
@@ -32,6 +37,7 @@ Landed in this tranche:
 - MCP smoke coverage for forget dry-run, executed delete, executed redact, search cleanup, and refresh handoff
 - MCP smoke coverage for consolidate dry-run, executed decision/procedure promotion, searchability, audit row, and idempotent duplicate skip
 - MCP and HTTP smoke coverage for dogfood seed idempotency, memory update, memory supersede, retention audit/sweep, audit rows, latest-only behavior, and post-write indexed searchability
+- MCP and HTTP smoke coverage for rebuild-all indexes, privacy audit, generated cleanup, access audit, Consolidation V2, code search, and agent doctor readiness
 - Phase 4 step 1: deterministic memory/context search filters, source-quality scoring, and explainable ranking breakdowns
 - Phase 4 step 2: optional rebuildable BM25 cache with freshness reporting, direct indexed search opt-in, and automatic fresh-cache use inside the AI memory harness
 - Phase 4 step 3: optional rebuildable entity graph cache with freshness reporting, entity/hybrid indexed search, and automatic fresh-cache hybrid use inside the AI memory harness
@@ -43,7 +49,7 @@ Verification:
 
 - `npm test`
 - `npm run build`
-- Browser UI smoke: initialize/rebuild demo project, open Project map -> Memory, verify Canonical Memory status, deterministic search filters, BM25/entity/vector cache freshness, AI memory harness auto-read calls, consolidation proposals, audit timeline, preview forget impact, confirmed forget execution, confirmed consolidate execution, richer empty states, Product tab health/launcher/state-transfer/sandbox surfaces, and console cleanliness.
+- Browser UI smoke: initialize/rebuild demo project, open Project map -> Memory, verify Canonical Memory status, deterministic search filters, BM25/entity/vector cache freshness, P1/P2 Privacy/Access/V2/Cleanup cards, Rebuild all, Preview cleanup, AI memory harness auto-read calls, consolidation proposals, audit timeline, preview forget impact, confirmed forget execution, confirmed consolidate execution, richer empty states, Product tab health/launcher/state-transfer/sandbox surfaces, and console cleanliness.
 
 ## Phase 1: MCP-Native Project Memory
 
@@ -156,6 +162,10 @@ Rules now enforced:
 - supersede creates a new record version, marks the old record non-latest with `supersededBy`, carries `supersedes`, requires a reason, and keeps history readable by exact ref
 - retention audit applies `validUntil`, per-record TTL, policy TTL, and generated bundle limits without mutation; retention sweep defaults to dry-run and marks eligible records expired instead of deleting decisions/procedures
 - executed canonical writes refresh `.project-agent/memory/index.md`, `.project-agent/indexes/memory-bm25.json`, `.project-agent/indexes/memory-entities.json`, and `.project-agent/indexes/memory-vectors.json`
+- access audit records harness read/search calls in bounded `.project-agent/memory/access.jsonl`
+- generated cleanup protects active handoff files by default and removes only rebuildable files unless refs are explicit
+- privacy audit reports secret-like state, weak provenance, raw architecture policy risks, and writer audit gaps
+- Consolidation V2 proposes add/update/supersede/expire actions before execution
 
 ### Deployment
 
@@ -191,6 +201,13 @@ HTTP endpoints:
 - `POST /api/memory/supersede`
 - `GET /api/memory/retention`
 - `POST /api/memory/retention/sweep`
+- `POST /api/memory/indexes/rebuild-all`
+- `GET /api/memory/privacy`
+- `GET /api/memory/access-audit`
+- `GET /api/memory/consolidate-v2`
+- `POST /api/memory/consolidate-v2`
+- `GET /api/memory/generated-cleanup`
+- `POST /api/memory/generated-cleanup`
 
 ### UI Testing
 
@@ -201,6 +218,8 @@ Current UI surface:
 - per-record `Preview forget` dry-run showing affected records, runtime events, and generated files
 - AI memory harness showing automatic `project_memory_search`, `project_memory_read`, and dry-run consolidation calls
 - lifecycle cards for dogfood seed and retention sweep status
+- P1/P2 cards for privacy, access audit, Consolidation V2, and generated cleanup
+- Rebuild all and Preview cleanup controls
 - harness lifecycle strip showing dogfood/retention state and next calls such as `project_memory_seed_dogfood` or `project_memory_retention_sweep`
 - consolidation proposals showing automatically discovered ready, low-confidence, and duplicate candidate counts
 - audit timeline showing memory add/forget/store lifecycle rows and action counts

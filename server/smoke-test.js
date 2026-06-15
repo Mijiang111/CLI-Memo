@@ -263,7 +263,9 @@ async function mcpSmoke(goalId) {
       "project_read_ref",
       "project_record_event",
       "project_architecture_changes",
+      "project_code_search",
       "project_handoff_audit",
+      "project_agent_doctor",
       "project_memory_inventory",
       "project_memory_seed_dogfood",
       "project_memory_add",
@@ -274,12 +276,17 @@ async function mcpSmoke(goalId) {
       "project_memory_rebuild_index",
       "project_memory_rebuild_entity_index",
       "project_memory_rebuild_vector_index",
+      "project_memory_rebuild_all_indexes",
       "project_memory_forget",
       "project_memory_retention_audit",
       "project_memory_retention_sweep",
+      "project_memory_privacy_audit",
+      "project_memory_generated_cleanup",
       "project_memory_harness",
       "project_memory_consolidate",
-      "project_memory_audit"
+      "project_memory_consolidate_v2",
+      "project_memory_audit",
+      "project_memory_access_audit"
     ]) {
       if (!toolNames.has(name)) throw new Error(`MCP tool missing: ${name}`);
     }
@@ -318,6 +325,23 @@ async function mcpSmoke(goalId) {
     }));
     if (!architecture.totals?.files || !Array.isArray(architecture.recentChanges)) {
       throw new Error(`MCP architecture changes failed: ${JSON.stringify(architecture)}`);
+    }
+
+    const codeSearch = mcpPayload(await client.callTool({
+      name: "project_code_search",
+      arguments: { query: "Project Agent", limit: 5, persist: false }
+    }));
+    if (codeSearch.schemaVersion !== "project-agent.code-search.v1" || codeSearch.engine !== "symbol-graph-lite" || codeSearch.ast?.treeSitter !== false) {
+      throw new Error(`MCP code search failed: ${JSON.stringify(codeSearch)}`);
+    }
+
+    const agentDoctor = mcpPayload(await client.callTool({
+      name: "project_agent_doctor",
+      arguments: { query: "CONSO_DECISION_SMOKE" }
+    }));
+    const doctorProviders = new Set((agentDoctor.providers || []).map((provider) => provider.id));
+    if (agentDoctor.schemaVersion !== "project-agent.agent-doctor.v1" || !doctorProviders.has("codex") || !doctorProviders.has("claude") || agentDoctor.firstCall?.tool !== "project_takeover_summary" || !agentDoctor.checks?.some((check) => check.id === "memory_harness")) {
+      throw new Error(`MCP agent doctor failed: ${JSON.stringify(agentDoctor)}`);
     }
 
     const audit = mcpPayload(await client.callTool({ name: "project_handoff_audit", arguments: {} }));
@@ -582,6 +606,14 @@ async function mcpSmoke(goalId) {
       throw new Error(`MCP memory vector indexed search failed: ${JSON.stringify(vectorMemorySearch)}`);
     }
 
+    const rebuiltAllIndexes = mcpPayload(await client.callTool({
+      name: "project_memory_rebuild_all_indexes",
+      arguments: {}
+    }));
+    if (rebuiltAllIndexes.schemaVersion !== "project-agent.memory-all-indexes-rebuild.v1" || rebuiltAllIndexes.status !== "fresh" || rebuiltAllIndexes.indexes?.semantic?.status !== "future_gated" || !rebuiltAllIndexes.auditRef) {
+      throw new Error(`MCP memory rebuild-all indexes failed: ${JSON.stringify(rebuiltAllIndexes)}`);
+    }
+
     const indexedHarness = mcpPayload(await client.callTool({
       name: "project_memory_harness",
       arguments: {
@@ -596,6 +628,17 @@ async function mcpSmoke(goalId) {
     }));
     if (indexedHarness.search?.optionalIndexes?.bm25?.used !== true || indexedHarness.search?.optionalIndexes?.entity?.used !== true || indexedHarness.search?.optionalIndexes?.vector?.used !== true || indexedHarness.appliedCalls?.[0]?.arguments?.useIndex !== "hybrid" || !indexedHarness.autoReads?.some((item) => item.ref === addedMemory.ref)) {
       throw new Error(`MCP memory harness should auto-use fresh hybrid indexes: ${JSON.stringify(indexedHarness)}`);
+    }
+    if (!indexedHarness.appliedCalls?.some((call) => call.tool === "project_memory_consolidate_v2") || !indexedHarness.lifecycle?.accessAudit) {
+      throw new Error(`MCP memory harness missing v2/access audit automation: ${JSON.stringify(indexedHarness)}`);
+    }
+
+    const accessAudit = mcpPayload(await client.callTool({
+      name: "project_memory_access_audit",
+      arguments: { limit: 20 }
+    }));
+    if (accessAudit.schemaVersion !== "project-agent.memory-access-audit-query.v1" || !["ok", "empty"].includes(accessAudit.status) || !accessAudit.entries?.some((item) => item.action === "memory_search_accessed") || !accessAudit.entries?.some((item) => item.action === "memory_read_accessed")) {
+      throw new Error(`MCP memory access audit missing harness search/read rows: ${JSON.stringify(accessAudit)}`);
     }
 
     const updatedMemory = mcpPayload(await client.callTool({
@@ -698,6 +741,13 @@ async function mcpSmoke(goalId) {
     }));
     if (retentionAudit.schemaVersion !== "project-agent.memory-retention-audit.v1" || !retentionAudit.candidates?.some((item) => item.id === expiredMemory.record.id && item.action === "expire" && item.eligible)) {
       throw new Error(`MCP memory retention audit failed: ${JSON.stringify(retentionAudit)}`);
+    }
+    const consolidationV2Preview = mcpPayload(await client.callTool({
+      name: "project_memory_consolidate_v2",
+      arguments: { mode: "session", dryRun: true, includeRetention: true, limit: 20 }
+    }));
+    if (consolidationV2Preview.schemaVersion !== "project-agent.memory-consolidation-v2.v1" || !consolidationV2Preview.dryRun || !consolidationV2Preview.proposals?.some((item) => item.operation === "expire" && item.matchedRecord?.id === expiredMemory.record.id)) {
+      throw new Error(`MCP memory consolidation v2 retention proposal failed: ${JSON.stringify(consolidationV2Preview)}`);
     }
     const retentionDryRun = mcpPayload(await client.callTool({
       name: "project_memory_retention_sweep",
@@ -806,6 +856,31 @@ async function mcpSmoke(goalId) {
     }));
     if (redactedSearch.results?.some((item) => item.id === redactMemory.record.id)) {
       throw new Error(`MCP redacted memory content still appears in search: ${JSON.stringify(redactedSearch)}`);
+    }
+
+    const privacyAudit = mcpPayload(await client.callTool({
+      name: "project_memory_privacy_audit",
+      arguments: { limit: 20 }
+    }));
+    if (privacyAudit.schemaVersion !== "project-agent.memory-privacy-audit.v1" || !["ok", "watch", "warn"].includes(privacyAudit.status) || privacyAudit.policy?.allowRawArchitectureText !== false) {
+      throw new Error(`MCP memory privacy audit failed: ${JSON.stringify(privacyAudit)}`);
+    }
+
+    const recoveryPath = path.join(projectDir, ".project-agent", "recovery.md");
+    writeFileSync(recoveryPath, `# Rebuildable Recovery\n\n${"generated cleanup smoke ".repeat(80)}\n`, "utf8");
+    const generatedCleanupPreview = mcpPayload(await client.callTool({
+      name: "project_memory_generated_cleanup",
+      arguments: { dryRun: true, mode: "overLimit", maxBytes: 20, limit: 20 }
+    }));
+    if (generatedCleanupPreview.schemaVersion !== "project-agent.memory-generated-cleanup.v1" || !generatedCleanupPreview.dryRun || !generatedCleanupPreview.candidates?.some((item) => item.ref === ".project-agent/recovery.md")) {
+      throw new Error(`MCP generated cleanup dry-run failed: ${JSON.stringify(generatedCleanupPreview)}`);
+    }
+    const generatedCleanupExecuted = mcpPayload(await client.callTool({
+      name: "project_memory_generated_cleanup",
+      arguments: { dryRun: false, mode: "overLimit", maxBytes: 20, limit: 20 }
+    }));
+    if (generatedCleanupExecuted.dryRun || !generatedCleanupExecuted.removed?.some((item) => item.ref === ".project-agent/recovery.md") || existsSync(recoveryPath)) {
+      throw new Error(`MCP generated cleanup execution failed: ${JSON.stringify(generatedCleanupExecuted)}`);
     }
   } catch (error) {
     throw new Error(`${error.message || String(error)}${stderr ? `\nMCP stderr:\n${stderr}` : ""}`);
@@ -1315,6 +1390,10 @@ try {
   if (entityMemoryEndpoint.ranking?.optionalIndexes?.bm25?.used !== true || entityMemoryEndpoint.ranking?.optionalIndexes?.entity?.used !== true || entityMemoryEndpoint.ranking?.optionalIndexes?.vector?.used !== true || !entityMemoryEndpoint.results?.some((item) => item.snippet.includes("CONSO_DECISION_SMOKE") && item.scoreBreakdown?.entity && item.scoreBreakdown?.vector)) {
     throw new Error(`memory hybrid entity search endpoint failed: ${JSON.stringify(entityMemoryEndpoint)}`);
   }
+  const rebuiltAllMemoryIndexesEndpoint = await post("/api/memory/indexes/rebuild-all", {});
+  if (rebuiltAllMemoryIndexesEndpoint.schemaVersion !== "project-agent.memory-all-indexes-rebuild.v1" || rebuiltAllMemoryIndexesEndpoint.status !== "fresh" || rebuiltAllMemoryIndexesEndpoint.stateManifest?.path !== ".project-agent/state-manifest.json") {
+    throw new Error(`memory rebuild-all endpoint failed: ${JSON.stringify(rebuiltAllMemoryIndexesEndpoint)}`);
+  }
   const contextSearchEndpoint = await get("/api/context-search?query=project-agent&folder=.project-agent&fileType=json&limit=5");
   if (contextSearchEndpoint.filters?.folder !== ".project-agent" || contextSearchEndpoint.filters?.fileType !== "json" || !contextSearchEndpoint.results?.length || !contextSearchEndpoint.results.every((item) => item.file.startsWith(".project-agent/") && item.file.endsWith(".json"))) {
     throw new Error(`context search endpoint filters failed: ${JSON.stringify(contextSearchEndpoint)}`);
@@ -1359,6 +1438,13 @@ try {
   }
   if (!memoryHarnessEndpoint.appliedCalls?.some((call) => call.tool === "project_memory_retention_audit") || !memoryHarnessEndpoint.lifecycle?.dogfood || !memoryHarnessEndpoint.lifecycle?.retention) {
     throw new Error(`memory harness endpoint missing lifecycle automation: ${JSON.stringify(memoryHarnessEndpoint)}`);
+  }
+  if (!memoryHarnessEndpoint.appliedCalls?.some((call) => call.tool === "project_memory_consolidate_v2") || !memoryHarnessEndpoint.lifecycle?.accessAudit) {
+    throw new Error(`memory harness endpoint missing P1/P2 automation: ${JSON.stringify(memoryHarnessEndpoint)}`);
+  }
+  const memoryAccessAuditEndpoint = await get("/api/memory/access-audit?limit=20");
+  if (memoryAccessAuditEndpoint.schemaVersion !== "project-agent.memory-access-audit-query.v1" || !memoryAccessAuditEndpoint.entries?.some((item) => item.action === "memory_search_accessed") || !memoryAccessAuditEndpoint.entries?.some((item) => item.action === "memory_read_accessed")) {
+    throw new Error(`memory access audit endpoint missing bounded harness rows: ${JSON.stringify(memoryAccessAuditEndpoint)}`);
   }
   const dogfoodSeedEndpoint = await post("/api/memory/seed-dogfood", {});
   if (dogfoodSeedEndpoint.schemaVersion !== "project-agent.memory-dogfood-seed.v1" || !["ok", "seeded", "unavailable"].includes(dogfoodSeedEndpoint.status) || dogfoodSeedEndpoint.dryRun) {
@@ -1430,6 +1516,10 @@ try {
   if (httpRetentionAudit.schemaVersion !== "project-agent.memory-retention-audit.v1" || !httpRetentionAudit.candidates?.some((item) => item.id === httpExpiredMemory.record.id && item.eligible)) {
     throw new Error(`memory retention endpoint failed: ${JSON.stringify(httpRetentionAudit)}`);
   }
+  const httpConsolidationV2 = await get("/api/memory/consolidate-v2?mode=session&includeRetention=true&limit=20");
+  if (httpConsolidationV2.schemaVersion !== "project-agent.memory-consolidation-v2.v1" || !httpConsolidationV2.dryRun || !httpConsolidationV2.proposals?.some((item) => item.operation === "expire" && item.matchedRecord?.id === httpExpiredMemory.record.id)) {
+    throw new Error(`memory consolidation v2 endpoint failed: ${JSON.stringify(httpConsolidationV2)}`);
+  }
   const httpRetentionSweep = await post("/api/memory/retention/sweep", {
     dryRun: false,
     limit: 100,
@@ -1437,6 +1527,21 @@ try {
   });
   if (httpRetentionSweep.dryRun || !httpRetentionSweep.refreshScheduled || !httpRetentionSweep.mutations?.some((item) => item.expired >= 1)) {
     throw new Error(`memory retention sweep endpoint failed: ${JSON.stringify(httpRetentionSweep)}`);
+  }
+  const httpRecoveryPath = path.join(projectDir, ".project-agent", "recovery.md");
+  writeFileSync(httpRecoveryPath, `# HTTP Rebuildable Recovery\n\n${"http cleanup smoke ".repeat(80)}\n`, "utf8");
+  const httpGeneratedCleanupPreview = await get("/api/memory/generated-cleanup?mode=overLimit&maxBytes=20&limit=20");
+  if (httpGeneratedCleanupPreview.schemaVersion !== "project-agent.memory-generated-cleanup.v1" || !httpGeneratedCleanupPreview.dryRun || !httpGeneratedCleanupPreview.candidates?.some((item) => item.ref === ".project-agent/recovery.md")) {
+    throw new Error(`memory generated cleanup preview endpoint failed: ${JSON.stringify(httpGeneratedCleanupPreview)}`);
+  }
+  const httpGeneratedCleanup = await post("/api/memory/generated-cleanup", {
+    dryRun: false,
+    mode: "overLimit",
+    maxBytes: 20,
+    limit: 20
+  });
+  if (httpGeneratedCleanup.dryRun || !httpGeneratedCleanup.refreshScheduled || !httpGeneratedCleanup.removed?.some((item) => item.ref === ".project-agent/recovery.md") || existsSync(httpRecoveryPath)) {
+    throw new Error(`memory generated cleanup endpoint failed: ${JSON.stringify(httpGeneratedCleanup)}`);
   }
   const cliBootstrapEndpoint = await get("/api/cli-agent-bootstrap?query=CONSO_DECISION_SMOKE%20CONSO_PROCEDURE_SMOKE");
   if (cliBootstrapEndpoint.memoryHarness?.schemaVersion !== "project-agent.memory-harness.v1" || !cliBootstrapEndpoint.markdown?.includes("Automatic Memory Harness") || !cliBootstrapEndpoint.memoryHarness?.autoReads?.some((item) => item.snippet.includes("CONSO_DECISION_SMOKE"))) {
@@ -1462,6 +1567,10 @@ try {
   const memoryAuditEndpoint = await get("/api/memory/audit?limit=10");
   if (memoryAuditEndpoint.schemaVersion !== "project-agent.memory-audit-query.v1" || !["ok", "warn"].includes(memoryAuditEndpoint.status) || !memoryAuditEndpoint.entries?.some((item) => item.action === "memory_added") || !memoryAuditEndpoint.entries?.some((item) => item.action === "memory_consolidated") || !memoryAuditEndpoint.totals?.actionCounts) {
     throw new Error(`memory audit endpoint missing canonical timeline rows: ${JSON.stringify(memoryAuditEndpoint)}`);
+  }
+  const memoryPrivacyEndpoint = await get("/api/memory/privacy?limit=20");
+  if (memoryPrivacyEndpoint.schemaVersion !== "project-agent.memory-privacy-audit.v1" || !["ok", "watch", "warn"].includes(memoryPrivacyEndpoint.status) || memoryPrivacyEndpoint.policy?.allowRawArchitectureText !== false) {
+    throw new Error(`memory privacy endpoint failed: ${JSON.stringify(memoryPrivacyEndpoint)}`);
   }
   const memoryAuditForgetEndpoint = await get("/api/memory/audit?action=memory_forget_executed&limit=5");
   if (!memoryAuditForgetEndpoint.entries?.some((item) => item.action === "memory_forget_executed")) {
@@ -1964,6 +2073,15 @@ try {
     !smokeCodeGraph.changedImpact?.some((item) => item.path === "src/dep-target.js" && item.symbolDependents?.some((row) => row.source === "src/dep-entry.js" && row.calls >= 1) && item.recommendedReads?.includes("src/dep-entry.js"))
   ) {
     throw new Error(`code graph missing symbol-level dependency impact: ${JSON.stringify(smokeCodeGraph.symbolGraph)}`);
+  }
+  const codeSearchEndpoint = await get("/api/code/search?symbol=dependencyTarget&limit=5");
+  if (codeSearchEndpoint.schemaVersion !== "project-agent.code-search.v1" || codeSearchEndpoint.engine !== "symbol-graph-lite" || codeSearchEndpoint.ast?.treeSitter !== false || !codeSearchEndpoint.results?.some((item) => item.path === "src/dep-target.js" && item.symbolDependents?.some((row) => row.source === "src/dep-entry.js"))) {
+    throw new Error(`code search endpoint missing symbol dependency result: ${JSON.stringify(codeSearchEndpoint)}`);
+  }
+  const agentDoctorEndpoint = await get("/api/agent/doctor?query=dependencyTarget");
+  const doctorProviders = new Set((agentDoctorEndpoint.providers || []).map((provider) => provider.id));
+  if (agentDoctorEndpoint.schemaVersion !== "project-agent.agent-doctor.v1" || !doctorProviders.has("codex") || !doctorProviders.has("claude") || agentDoctorEndpoint.firstCall?.tool !== "project_takeover_summary" || !agentDoctorEndpoint.checks?.some((check) => check.id === "code_search") || !agentDoctorEndpoint.checks?.some((check) => check.id === "bounded_access_audit")) {
+    throw new Error(`agent doctor endpoint failed: ${JSON.stringify(agentDoctorEndpoint)}`);
   }
   if (!codeWorkstreamInsights.continuity?.preEditRisk?.checks?.some((check) => check.id === "dependency_impact" && check.refs?.includes("src/dep-entry.js") && check.refs?.includes("src/dep-target.test.js"))) {
     throw new Error(`pre-edit risk missing dependency impact check: ${JSON.stringify(codeWorkstreamInsights.continuity?.preEditRisk)}`);
@@ -2587,6 +2705,9 @@ try {
   }
   if (!appSource.includes("data-memory-lifecycle") || !appSource.includes("Dogfood") || !appSource.includes("Retention") || !appSource.includes("memory-lifecycle-strip")) {
     throw new Error("UI source missing visible P0 memory lifecycle surface");
+  }
+  if (!appSource.includes("data-memory-p1-p2") || !appSource.includes("Consolidation V2") || !appSource.includes("data-memory-consolidation-v2") || !appSource.includes("/memory/privacy") || !appSource.includes("/memory/access-audit") || !appSource.includes("/memory/generated-cleanup") || !appSource.includes("/memory/indexes/rebuild-all")) {
+    throw new Error("UI source missing visible P1/P2 memory control-plane surface");
   }
   if (!appSource.includes("SandboxPermissionPanel") || !appSource.includes("data-sandbox-guidance") || !appSource.includes("/security/sandbox") || !appSource.includes("Sandbox & Permissions")) {
     throw new Error("UI source missing visible sandbox and permission guidance surface");

@@ -205,7 +205,9 @@ The MCP server exposes the first project-native tool set:
 - `project_read_ref`: read a project-relative file ref, line range, or JSON selector.
 - `project_record_event`: record the agent's current process event into runtime state.
 - `project_architecture_changes`: inspect recent changes, impact, inspect order, code graph summary, symbol callers, likely test owners, and read-before-edit recommendations.
+- `project_code_search`: query the local `symbol-graph-lite` import/export/call graph for files, symbols, dependents, tests, and refs.
 - `project_handoff_audit`: verify takeover readiness, freshness, manifest status, inspection coverage, blockers, and warnings.
+- `project_agent_doctor`: run a Codex/Claude/generic readiness doctor across bootstrap, memory harness, indexes, privacy, access audit, and code search.
 - `project_memory_search`: search canonical memory with deterministic type/file/folder/sourceRef/concept/goalId/fileType/sourceQuality filters, exact refs, source-quality flags, and score breakdowns.
 - `project_memory_seed_dogfood`: idempotently seed benchmark-backed product dogfood memories when `docs/research/memory-gap-deep-benchmark.md` exists.
 - `project_memory_update`: update one canonical memory with a required reason, provenance-preserving version increment, audit row, and cache cascade refresh.
@@ -215,9 +217,14 @@ The MCP server exposes the first project-native tool set:
 - `project_memory_rebuild_index`: rebuild the optional `.project-agent/indexes/memory-bm25.json` cache; direct search uses it when `useIndex: "bm25"` is explicitly requested and the cache is fresh.
 - `project_memory_rebuild_entity_index`: rebuild the optional `.project-agent/indexes/memory-entities.json` entity graph cache over canonical memory concepts, refs, files, folders, and terms.
 - `project_memory_rebuild_vector_index`: rebuild the optional `.project-agent/indexes/memory-vectors.json` local lexical-vector cache. It uses deterministic hashed sparse vectors with `embeddingProvider: "none"` and only affects search when `useIndex: "vector"` or `useIndex: "hybrid"` is requested or auto-selected by the harness.
+- `project_memory_rebuild_all_indexes`: rebuild `index.md`, BM25, entity, and lexical-vector caches together from canonical JSONL memory.
+- `project_memory_privacy_audit`: scan canonical memory and bounded `.project-agent` state for secret-like text, weak provenance, raw architecture policy risks, and writer audit gaps.
+- `project_memory_generated_cleanup`: dry-run or remove rebuildable generated/index files. Active handoff files are protected by default unless explicitly targeted.
+- `project_memory_consolidate_v2`: return governed add/update/supersede/expire proposals before any mutation.
+- `project_memory_access_audit`: query bounded memory search/read access rows recorded by the automatic harness or explicit `auditAccess` calls.
 - `project_memory_harness`: automatically derive memory search/read calls from the active goal, current cursor, recent runtime events, risks, and changed files. It auto-uses fresh BM25/entity/vector caches as a hybrid search path, checks dogfood/retention lifecycle state, returns governed next calls, and is returned by `project_takeover_summary` so agents do not wait for a human to pick memory refs manually.
 
-HTTP mirrors the lifecycle tools with `POST /api/memory/seed-dogfood`, `POST /api/memory/update`, `POST /api/memory/supersede`, `GET /api/memory/retention`, and `POST /api/memory/retention/sweep`.
+HTTP mirrors the lifecycle and quality tools with `POST /api/memory/seed-dogfood`, `POST /api/memory/update`, `POST /api/memory/supersede`, `GET /api/memory/retention`, `POST /api/memory/retention/sweep`, `POST /api/memory/indexes/rebuild-all`, `GET /api/memory/privacy`, `GET /api/memory/access-audit`, `GET/POST /api/memory/consolidate-v2`, `GET/POST /api/memory/generated-cleanup`, `GET /api/code/search`, and `GET /api/agent/doctor`.
 
 Pre-start projects are treated as `not_started`, not as failed handoffs. In that state, `project_takeover_summary` points the agent to `project_start` and avoids returning refs that do not exist yet.
 

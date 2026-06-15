@@ -54,7 +54,9 @@ import { buildContinuityAudit, writeContinuityAudit } from "./continuity-audit.j
 import { refreshTakeoverAcceptanceAudit } from "./takeover-acceptance-audit.js";
 import { defaultContextQuery, readContextRef, searchContext } from "./grep-context.js";
 import { buildAgentBootstrapKit, buildCliAgentCommand, resolveCodexCli, writeCliAgentBootstrap } from "./cli-agent-bootstrap.js";
-import { addMemory, auditMemoryRetention, buildMemoryHarness, buildMemoryInventory, consolidateMemory, ensureMemoryStore, forgetMemory, inspectMemoryEntityIndex, inspectMemorySearchIndex, inspectMemoryVectorIndex, queryMemoryAudit, readMemory, rebuildMemoryEntityIndex, rebuildMemorySearchIndex, rebuildMemoryVectorIndex, seedDogfoodMemory, searchMemory, supersedeMemory, sweepMemoryRetention, updateMemory } from "./memory-store.js";
+import { buildAgentDoctor } from "./agent-doctor.js";
+import { searchCodeGraph } from "./code-search.js";
+import { addMemory, auditMemoryPrivacy, auditMemoryRetention, buildMemoryHarness, buildMemoryInventory, cleanupGeneratedMemoryState, consolidateMemory, consolidateMemoryV2, ensureMemoryStore, forgetMemory, inspectMemoryEntityIndex, inspectMemorySearchIndex, inspectMemoryVectorIndex, queryMemoryAccessAudit, queryMemoryAudit, readMemory, rebuildAllMemoryIndexes, rebuildMemoryEntityIndex, rebuildMemorySearchIndex, rebuildMemoryVectorIndex, seedDogfoodMemory, searchMemory, supersedeMemory, sweepMemoryRetention, updateMemory } from "./memory-store.js";
 import { buildStateExport, importStateExportBundle } from "./state-transfer.js";
 import { buildProjectLauncher, launchProjectInstance, readProjectLauncherLogs, registerLauncherProject, restartProjectInstance, stopProjectInstance } from "./project-launcher.js";
 import { buildSandboxGuidance } from "./sandbox-guidance.js";
@@ -149,6 +151,23 @@ function asyncHandler(fn) {
 
 function currentSummary() {
   return summarizeState(readState(projectDir));
+}
+
+function refreshGeneratedProjectState(role = "coding_agent") {
+  const stateManifest = writeStateManifest(projectDir, buildStateManifest(projectDir));
+  const bundle = readAgentContextBundle(projectDir) || null;
+  const verification = verifyAgentContextBundle(projectDir, bundle);
+  const takeoverSummary = readTakeoverSummary(projectDir) || null;
+  return {
+    role,
+    stateManifest: {
+      path: ".project-agent/state-manifest.json",
+      aggregateHash: stateManifest.aggregateHash,
+      fileCount: stateManifest.files?.length || stateManifest.fileCount || 0
+    },
+    verification,
+    takeoverSummary
+  };
 }
 
 function safeCall(fn, fallback = null) {
@@ -455,7 +474,10 @@ app.get("/api/memory/search", (req, res) => {
     sourceQuality: req.query.sourceQuality || undefined,
     latestOnly: req.query.latestOnly === undefined ? undefined : req.query.latestOnly === "true",
     useIndex: req.query.useIndex || req.query.index || undefined,
-    limit: Number(req.query.limit || 10)
+    limit: Number(req.query.limit || 10),
+    auditAccess: req.query.auditAccess === "true" || req.query.auditAccess === "1",
+    accessActor: "http-api",
+    accessTool: "GET /api/memory/search"
   }));
 });
 
@@ -520,6 +542,14 @@ app.post("/api/memory/vector-index/rebuild", (req, res) => {
   }
 });
 
+app.post("/api/memory/indexes/rebuild-all", (req, res) => {
+  try {
+    res.json(responseWithFreshManifest(rebuildAllMemoryIndexes(projectDir, req.body || {})));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
 app.get("/api/memory/harness", (req, res) => {
   try {
     res.json(buildMemoryHarness(projectDir, {
@@ -541,7 +571,10 @@ app.get("/api/memory/harness", (req, res) => {
       retentionLimit: req.query.retentionLimit === undefined ? undefined : Number(req.query.retentionLimit),
       minConfidence: req.query.minConfidence === undefined ? undefined : Number(req.query.minConfidence),
       consolidate: req.query.consolidate === undefined ? undefined : req.query.consolidate !== "false",
-      consolidationMode: req.query.consolidationMode || undefined
+      consolidateV2: req.query.consolidateV2 === undefined ? undefined : req.query.consolidateV2 !== "false",
+      consolidationMode: req.query.consolidationMode || undefined,
+      v2CandidateLimit: req.query.v2CandidateLimit === undefined ? undefined : Number(req.query.v2CandidateLimit),
+      auditAccess: req.query.auditAccess === undefined ? undefined : req.query.auditAccess !== "false"
     }));
   } catch (error) {
     res.status(error.status || 500).json({ error: error.message || String(error) });
@@ -565,6 +598,38 @@ app.get("/api/memory/consolidate", (req, res) => {
   }
 });
 
+app.get("/api/memory/consolidate-v2", (req, res) => {
+  try {
+    res.json(consolidateMemoryV2(projectDir, {
+      mode: req.query.mode || "dryRun",
+      dryRun: true,
+      goalId: req.query.goalId || undefined,
+      since: req.query.since || undefined,
+      until: req.query.until || undefined,
+      limit: Number(req.query.limit || 10),
+      eventLimit: req.query.eventLimit === undefined ? undefined : Number(req.query.eventLimit),
+      retentionLimit: req.query.retentionLimit === undefined ? undefined : Number(req.query.retentionLimit),
+      minConfidence: req.query.minConfidence === undefined ? undefined : Number(req.query.minConfidence),
+      includeRetention: req.query.includeRetention === undefined ? undefined : req.query.includeRetention !== "false",
+      preferSupersede: req.query.preferSupersede === "true" || req.query.preferSupersede === "1"
+    }));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get("/api/memory/privacy", (req, res) => {
+  try {
+    res.json(auditMemoryPrivacy(projectDir, {
+      limit: Number(req.query.limit || 40),
+      maxFileBytes: req.query.maxFileBytes === undefined ? undefined : Number(req.query.maxFileBytes),
+      audit: req.query.audit === "true" || req.query.audit === "1"
+    }));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
 app.get("/api/memory/audit", (req, res) => {
   res.json(queryMemoryAudit(projectDir, {
     action: req.query.action || undefined,
@@ -579,9 +644,28 @@ app.get("/api/memory/audit", (req, res) => {
   }));
 });
 
+app.get("/api/memory/access-audit", (req, res) => {
+  res.json(queryMemoryAccessAudit(projectDir, {
+    action: req.query.action || undefined,
+    tool: req.query.tool || undefined,
+    actor: req.query.actor || undefined,
+    query: req.query.query || req.query.q || undefined,
+    ref: req.query.ref || undefined,
+    since: req.query.since || undefined,
+    until: req.query.until || undefined,
+    limit: Number(req.query.limit || 20)
+  }));
+});
+
 app.get("/api/memory/read", (req, res) => {
   try {
-    res.json(readMemory(projectDir, { id: req.query.id, ref: req.query.ref }));
+    res.json(readMemory(projectDir, {
+      id: req.query.id,
+      ref: req.query.ref,
+      auditAccess: req.query.auditAccess === "true" || req.query.auditAccess === "1",
+      accessActor: "http-api",
+      accessTool: "GET /api/memory/read"
+    }));
   } catch (error) {
     res.status(error.status || 500).json({ error: error.message || String(error) });
   }
@@ -700,6 +784,30 @@ app.post("/api/memory/consolidate", (req, res) => {
   }
 });
 
+app.post("/api/memory/consolidate-v2", (req, res) => {
+  try {
+    const result = consolidateMemoryV2(projectDir, req.body || {});
+    if (!result.dryRun) {
+      writeStateManifest(projectDir, buildStateManifest(projectDir));
+      recordAndNotify({
+        phase: "evidence",
+        title: "Canonical memory consolidation v2 executed",
+        status: "done",
+        detail: result.summary,
+        refs: [result.auditRef, ...(result.executed || []).map((record) => record.ref)].filter(Boolean),
+        files: [{ path: ".project-agent/memory", status: "modified", kind: "memory" }]
+      }, { reason: "memory-consolidate-v2" });
+      autoHandoffSnapshot?.schedule("memory-consolidate-v2");
+    }
+    res.json({
+      ...result,
+      refreshScheduled: !result.dryRun
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
 app.post("/api/memory/retention/sweep", (req, res) => {
   try {
     const result = sweepMemoryRetention(projectDir, req.body || {});
@@ -717,6 +825,49 @@ app.post("/api/memory/retention/sweep", (req, res) => {
     }
     res.json({
       ...result,
+      refreshScheduled: !result.dryRun
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get("/api/memory/generated-cleanup", (req, res) => {
+  try {
+    res.json(cleanupGeneratedMemoryState(projectDir, {
+      dryRun: true,
+      mode: req.query.mode || "overLimit",
+      ref: req.query.ref || undefined,
+      refs: req.query.refs ? String(req.query.refs).split(",").map((item) => item.trim()).filter(Boolean) : undefined,
+      maxBytes: req.query.maxBytes === undefined ? undefined : Number(req.query.maxBytes),
+      includeIndexes: req.query.includeIndexes === "true" || req.query.includeIndexes === "1",
+      limit: Number(req.query.limit || 50),
+      audit: false
+    }));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post("/api/memory/generated-cleanup", (req, res) => {
+  try {
+    const result = cleanupGeneratedMemoryState(projectDir, req.body || {});
+    let generatedRefresh = null;
+    if (!result.dryRun) {
+      generatedRefresh = refreshGeneratedProjectState(req.body?.role || "coding_agent");
+      recordAndNotify({
+        phase: "audit",
+        title: "Generated memory state cleaned",
+        status: result.status === "warn" ? "blocked" : "done",
+        detail: result.summary,
+        refs: [result.auditRef, ...(result.removed || []).map((item) => item.ref)].filter(Boolean),
+        files: [{ path: ".project-agent", status: "modified", kind: "state" }]
+      }, { reason: "memory-generated-cleanup" });
+      autoHandoffSnapshot?.schedule("memory-generated-cleanup");
+    }
+    res.json({
+      ...result,
+      generatedRefresh,
       refreshScheduled: !result.dryRun
     });
   } catch (error) {
@@ -852,6 +1003,22 @@ app.get("/api/context-search", (req, res) => {
   }));
 });
 
+app.get("/api/code/search", (req, res) => {
+  try {
+    res.json(searchCodeGraph(projectDir, {
+      query: req.query.query || req.query.q || "",
+      file: req.query.file || undefined,
+      symbol: req.query.symbol || undefined,
+      symbolKind: req.query.symbolKind || req.query.kind || undefined,
+      language: req.query.language || req.query.lang || undefined,
+      limit: Number(req.query.limit || 10),
+      persist: req.query.persist === "true" || req.query.persist === "1"
+    }));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
 app.get("/api/cli-agent-bootstrap", (req, res) => {
   const bootstrap = writeCliAgentBootstrap(projectDir, {
     appRoot,
@@ -874,6 +1041,20 @@ app.get("/api/agent/bootstrap", (req, res) => {
     uiPort,
     provider: req.query.provider || undefined
   }));
+});
+
+app.get("/api/agent/doctor", (req, res) => {
+  try {
+    res.json(buildAgentDoctor(projectDir, {
+      appRoot,
+      bindHost,
+      apiPort: port,
+      uiPort,
+      query: req.query.query || req.query.q || undefined
+    }));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
 });
 
 app.get("/api/agent-context-prompt", (req, res) => {

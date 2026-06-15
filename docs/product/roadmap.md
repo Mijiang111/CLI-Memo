@@ -62,7 +62,7 @@ Acceptance criteria:
 
 ## Phase 3: Memory Lifecycle And Governance
 
-Status: in progress. Canonical memory foundation, forget/consolidate governance, hybrid-lite indexes, and P0 lifecycle closure are landed. The latest tranche adds idempotent dogfood seed, first-class update/supersede, retention audit/sweep, and cache cascade refresh across all canonical memory write paths.
+Status: in progress. Canonical memory foundation, forget/consolidate governance, hybrid-lite indexes, P0 lifecycle closure, and the first P1/P2 memory quality tranche are landed. The latest tranche adds rebuild-all indexes, privacy audit, generated cleanup, bounded access audit, and governed Consolidation V2 proposals.
 
 Goal: turn project state from generated handoff files into governed memory units with inventory, retention, redaction, and forget semantics.
 
@@ -78,6 +78,8 @@ Work:
 - Add retention policy for runtime events, raw terminal output, architecture snapshot text, and generated bundles.
 - Add P0 lifecycle tools: `project_memory_seed_dogfood`, `project_memory_update`, `project_memory_supersede`, `project_memory_retention_audit`, and `project_memory_retention_sweep`.
 - Make the AI memory harness report dogfood/retention lifecycle state and recommend governed next calls without asking users to manually inspect memory files.
+- Add P1/P2 control tools: `project_memory_rebuild_all_indexes`, `project_memory_privacy_audit`, `project_memory_generated_cleanup`, `project_memory_consolidate_v2`, and `project_memory_access_audit`.
+- Record bounded read/search access rows when the harness automatically searches and reads memory, so agents can prove what memory was injected.
 
 Acceptance criteria:
 
@@ -88,6 +90,9 @@ Acceptance criteria:
 - Agents can update or supersede one canonical memory through first-class tools instead of using delete/forget as an indirect workaround.
 - Retention policy can be audited non-destructively and swept with dry-run-first expiry semantics.
 - Canonical writes refresh `index.md`, BM25, entity, and lexical-vector caches so the harness sees fresh memory after mutation.
+- Generated cleanup defaults to dry-run, protects active handoff files unless explicitly targeted, and refreshes rebuildable memory indexes after execution.
+- Privacy audit reports secret-like surfaces, weak provenance, raw architecture policy risks, and writer audit gaps with exact refs.
+- Consolidation V2 returns add/update/supersede/expire proposals before mutation and keeps semantic embeddings future-gated unless a provider is configured.
 
 Latest execution record, 2026-06-15:
 
@@ -95,10 +100,11 @@ Latest execution record, 2026-06-15:
 - Architecture / best code: `server/memory-store.js` now owns idempotent dogfood seed records, provenance-preserving in-place update, version-chain supersession, retention audit/sweep, and a shared memory-derived-state refresh path for `index.md`, BM25, entity, and lexical-vector caches.
 - Deployment: MCP exposes `project_memory_seed_dogfood`, `project_memory_update`, `project_memory_supersede`, `project_memory_retention_audit`, and `project_memory_retention_sweep`; HTTP mirrors them through `/api/memory/seed-dogfood`, `/api/memory/update`, `/api/memory/supersede`, `/api/memory/retention`, and `/api/memory/retention/sweep`.
 - UI testing: Project map -> Memory now shows Dogfood and Retention lifecycle metrics plus a harness lifecycle strip. Smoke coverage verifies MCP and HTTP seed/update/supersede/retention flows, audit rows, searchability, and cache refresh.
+- P1/P2 execution: `server/memory-store.js` now exposes rebuild-all indexes, privacy audit, generated cleanup, access audit, and Consolidation V2. The harness records bounded search/read access and surfaces V2 proposals without user memory-ref selection. MCP, HTTP, and Memory UI all expose the control plane.
 
 ## Phase 4: Better Retrieval And Memory Quality
 
-Status: in progress. Deterministic filters/source-quality scoring, optional rebuildable BM25 cache, optional rebuildable entity graph cache, and a local rebuildable `lexical-vector-lite` cache are landed; the AI memory harness auto-uses fresh optional caches as hybrid search while direct search keeps an explicit opt-in switch. Remote embedding/vector backends remain future-gated.
+Status: in progress. Deterministic filters/source-quality scoring, optional rebuildable BM25/entity/vector caches, rebuild-all cache refresh, and local privacy/access quality gates are landed; the AI memory harness auto-uses fresh optional caches as hybrid search while direct search keeps an explicit opt-in switch. Remote embedding/vector backends remain future-gated.
 
 Goal: make grep-first retrieval feel like a local project memory database.
 
@@ -110,6 +116,7 @@ Work:
 - Add optional rebuildable entity graph cache over canonical memory concepts, refs, files, folders, and terms.
 - Add optional embedding/vector reranking without making it the default takeover path. First vector tranche: `.project-agent/indexes/memory-vectors.json` stores local hashed lexical vectors with `embeddingProvider: none`; `project_memory_rebuild_vector_index`, `/api/memory/vector-index`, and `useIndex=vector|hybrid` expose explainable cosine reranking.
 - Add source/ref quality scoring so weak claims are flagged before injection.
+- Add rebuild-all index refresh and bounded access audit so retrieval quality is inspectable after automatic harness reads.
 
 Acceptance criteria:
 
@@ -127,6 +134,7 @@ Latest execution record, 2026-06-13:
 ## Phase 5: Stronger Code Intelligence
 
 Status: in progress. First tranche landed with local import graph changed-impact enrichment, test ownership hints, co-change recommendations, and read-before-edit refs in architecture, insights, prompts, and UI. Second tranche landed with handoff/pre-edit inspection coverage warnings that automatically detect read/test evidence from runtime events. Third tranche landed with local `symbol-graph-lite` export/import/call intelligence so changed-file impact can show which dependents call exported symbols.
+Latest tranche adds `project_code_search` and `/api/code/search` as a probe-like wrapper over `symbol-graph-lite`, plus `project_agent_doctor` and `/api/agent/doctor` to verify Codex/Claude/generic readiness across bootstrap, memory harness, indexes, privacy, access audit, and code search.
 
 Goal: move from file-level architecture awareness toward code ownership and dependency impact.
 
@@ -190,5 +198,5 @@ Latest execution record, 2026-06-13:
 8. Close P0 memory lifecycle: dogfood seed, update, supersede, retention audit/sweep, and write-path cache cascade refresh.
 9. Add optional FTS/BM25, entity, and local vector indexes; keep remote embedding/vector providers future-gated.
 10. Improve P1 memory quality: rebuild-all-indexes, Consolidation V2, optional semantic embeddings, privacy audit, and generated cleanup.
-11. Deepen P2 architecture/code memory with tree-sitter/probe-like AST search and bounded access audit.
+11. Deepen P2 architecture/code memory with probe-like code search and bounded access audit; keep full tree-sitter AST as the next replaceable engine.
 12. Productize setup, security, and external Codex/Claude MCP e2e doctor flows.

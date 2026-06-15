@@ -2603,6 +2603,13 @@ button:disabled {
   opacity: 0.48;
 }
 
+.memory-control-strip {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
 .memory-confirm-strip {
   min-width: 0;
   display: grid;
@@ -2645,15 +2652,28 @@ button:disabled {
   background: var(--amber-soft);
 }
 
+.memory-cleanup-preview {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  border: 1px solid #d4e2ef;
+  border-radius: 8px;
+  padding: 8px;
+  background: #f7fbff;
+}
+
 .memory-forget-preview strong,
-.memory-forget-preview span {
+.memory-forget-preview span,
+.memory-cleanup-preview strong,
+.memory-cleanup-preview span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.memory-forget-preview strong {
+.memory-forget-preview strong,
+.memory-cleanup-preview strong {
   color: #46340a;
   font-size: 11px;
   line-height: 15px;
@@ -2661,7 +2681,9 @@ button:disabled {
 }
 
 .memory-forget-preview span,
-.memory-forget-preview em {
+.memory-forget-preview em,
+.memory-cleanup-preview span,
+.memory-cleanup-preview em {
   color: #715108;
   font-size: 10px;
   line-height: 13px;
@@ -2669,14 +2691,25 @@ button:disabled {
   font-weight: 740;
 }
 
-.memory-forget-preview div {
+.memory-cleanup-preview strong {
+  color: #29455f;
+}
+
+.memory-cleanup-preview span,
+.memory-cleanup-preview em {
+  color: #3d5f7a;
+}
+
+.memory-forget-preview div,
+.memory-cleanup-preview div {
   min-width: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
 }
 
-.memory-forget-preview em {
+.memory-forget-preview em,
+.memory-cleanup-preview em {
   min-height: 22px;
   display: inline-flex;
   align-items: center;
