@@ -883,6 +883,7 @@ function lifecycleCheck(id, label, status, detail, refs = []) {
 function buildHandoffLifecycle({ goal, handoff, handoffSnapshot, takeoverReadiness, interruptedWork, agentLeases = [], preEditRisk }) {
   const snapshotAge = ageSeconds(handoffSnapshot?.updatedAt);
   const staleAgents = (agentLeases || []).filter((agent) => agent.effectiveStatus === "stale");
+  const inspectionCoverage = preEditRisk?.inspectionCoverage || null;
   const ttlSeconds = 900;
   const snapshotExpired = snapshotAge !== null && snapshotAge > ttlSeconds;
   const hasSnapshot = handoffSnapshot?.status === "done";
@@ -934,6 +935,13 @@ function buildHandoffLifecycle({ goal, handoff, handoffSnapshot, takeoverReadine
       preEditRisk?.status === "blocked" ? "bad" : ["high", "medium"].includes(preEditRisk?.status) ? "warn" : "ok",
       preEditRisk?.summary || "No pre-edit risk summary is available yet.",
       preEditRisk?.refs || []
+    ),
+    lifecycleCheck(
+      "inspection_coverage",
+      "Inspection Coverage",
+      inspectionCoverage?.status === "warn" ? "warn" : "ok",
+      inspectionCoverage?.summary || "No code graph inspection coverage is required yet.",
+      inspectionCoverage?.missingRefs?.length ? inspectionCoverage.missingRefs : inspectionCoverage?.requiredRefs || []
     )
   ];
   return {
@@ -3129,6 +3137,11 @@ function buildCodeGraphTrace(codeGraph = {}, changedFiles = []) {
   const nodeByPath = new Map((codeGraph.nodes || []).filter((node) => node?.path).map((node) => [node.path, node]));
   const dependenciesByPath = codeGraph.dependenciesByPath || {};
   const dependentsByPath = codeGraph.dependentsByPath || {};
+  const testOwnershipByPath = codeGraph.testOwnershipByPath || {};
+  const symbolGraph = codeGraph.symbolGraph || null;
+  const symbolsByPath = symbolGraph?.symbolsByPath || {};
+  const symbolDependentsByPath = symbolGraph?.symbolDependentsByPath || {};
+  const persistedImpactByPath = new Map((codeGraph.changedImpact || []).filter((item) => item?.path).map((item) => [item.path, item]));
   const changedImpact = (changedFiles || [])
     .filter((file) => file?.path && (nodeByPath.has(file.path) || dependenciesByPath[file.path] || dependentsByPath[file.path] || /\.(js|jsx|ts|tsx|mjs|cjs|mts|cts)$/i.test(file.path)))
     .slice(0, 12)
@@ -3136,29 +3149,54 @@ function buildCodeGraphTrace(codeGraph = {}, changedFiles = []) {
       const node = nodeByPath.get(file.path) || {};
       const dependencies = (dependenciesByPath[file.path] || node.imports || []).slice(0, 10);
       const dependents = (dependentsByPath[file.path] || node.importedBy || []).slice(0, 10);
+      const persisted = persistedImpactByPath.get(file.path) || {};
+      const tests = (testOwnershipByPath[file.path] || persisted.tests || []).slice(0, 8);
+      const symbols = (persisted.symbols || symbolsByPath[file.path]?.exportedSymbols || []).slice(0, 8);
+      const symbolDependents = (persisted.symbolDependents || symbolDependentsByPath[file.path] || []).slice(0, 8);
+      const symbolReadTargets = [...new Set(symbolDependents.map((item) => item.source).filter(Boolean))].slice(0, 8);
+      const coChanged = (persisted.coChanged || []).slice(0, 6);
+      const recommendedReads = [...new Set([...(persisted.recommendedReads || []), ...symbolReadTargets, ...dependents, ...dependencies.filter((item) => !String(item).startsWith("pkg:")), ...tests, ...coChanged].filter(Boolean))].slice(0, 16);
+      const firstReadTargets = [...new Set([...symbolReadTargets, ...dependents, ...tests].filter(Boolean))].slice(0, 3);
       return {
         path: file.path,
         status: file.status || "changed",
         dependencies,
         dependents,
         packageImports: (node.packageImports || []).slice(0, 8),
-        risk: dependents.length ? "fan_in" : dependencies.length ? "fan_out" : "isolated",
-        refs: [file.path, ...dependents.slice(0, 4), ...dependencies.slice(0, 4)].filter(Boolean),
-        nextAction: dependents.length
-          ? `Inspect ${dependents.slice(0, 3).join(", ")} before editing ${file.path}.`
-          : dependencies.length
+        symbols,
+        symbolDependents,
+        tests,
+        testStatus: tests.length ? "owned" : file.kind === "test" ? "test_file" : "missing",
+        coChanged,
+        recommendedReads,
+        risk: symbolDependents.length ? "symbol_fan_in" : dependents.length ? "fan_in" : tests.length ? "tested" : dependencies.length ? "fan_out" : "isolated",
+        refs: [file.path, ...recommendedReads.slice(0, 12)].filter(Boolean),
+        why: persisted.why || [
+          symbolDependents.length ? `${symbolDependents.length} symbol caller(s)` : "",
+          dependents.length ? `${dependents.length} local dependent(s)` : "",
+          dependencies.length ? `${dependencies.length} dependency link(s)` : "",
+          tests.length ? `${tests.length} likely test owner(s)` : "",
+          coChanged.length ? `${coChanged.length} co-changed file(s)` : ""
+        ].filter(Boolean).join("; "),
+        nextAction: symbolDependents.length
+          ? `Inspect ${firstReadTargets.join(", ")} for symbol calls before editing ${file.path}.`
+          : dependents.length
+          ? `Inspect ${firstReadTargets.join(", ")} before editing ${file.path}.`
+          : tests.length
+            ? `Run or inspect ${tests.slice(0, 3).join(", ")} before claiming ${file.path}.`
+            : dependencies.length
             ? `Inspect imports used by ${file.path} before editing.`
             : `No local dependency edge is linked for ${file.path}; inspect manually.`
       };
     });
   const inspectOrder = [
     ...changedImpact
-      .filter((item) => item.dependents.length || item.dependencies.length)
+      .filter((item) => item.symbolDependents?.length || item.dependents.length || item.dependencies.length)
       .map((item) => ({
         type: "dependency",
         path: item.path,
         status: item.risk,
-        reason: `${item.dependents.length} dependent(s), ${item.dependencies.length} dependency link(s)`,
+        reason: `${item.symbolDependents?.length || 0} symbol caller(s), ${item.dependents.length} dependent(s), ${item.dependencies.length} dependency link(s)`,
         refs: item.refs
       })),
     ...(codeGraph.hotspots || []).slice(0, 8).map((item) => ({
@@ -3178,10 +3216,17 @@ function buildCodeGraphTrace(codeGraph = {}, changedFiles = []) {
     localEdgeCount: codeGraph.localEdgeCount || 0,
     packageEdgeCount: codeGraph.packageEdgeCount || 0,
     unresolvedEdgeCount: codeGraph.unresolvedEdgeCount || 0,
+    symbolCount: codeGraph.symbolCount || symbolGraph?.symbolCount || 0,
+    symbolEdgeCount: codeGraph.symbolEdgeCount || symbolGraph?.usageEdgeCount || 0,
     nodes: (codeGraph.nodes || []).slice(0, 40),
     edges: (codeGraph.edges || []).slice(0, 80),
+    symbolGraph,
     packages: (codeGraph.packages || []).slice(0, 12),
     hotspots: (codeGraph.hotspots || []).slice(0, 10),
+    testFiles: (codeGraph.testFiles || []).slice(0, 20),
+    testOwnership: (codeGraph.testOwnership || []).slice(0, 20),
+    testOwnershipByPath,
+    coChangeRecommendations: (codeGraph.coChangeRecommendations || []).slice(0, 12),
     dependenciesByPath,
     dependentsByPath,
     changedImpact,
@@ -3434,6 +3479,134 @@ function isTestLikePath(relPath) {
   return /\.test\./.test(relPath) || /\.spec\./.test(relPath) || /(^|\/)tests?\//.test(relPath) || /(^|\/)__tests__\//.test(relPath);
 }
 
+function uniqueRefs(items = [], limit = 24) {
+  return [...new Set((items || []).filter(Boolean))].slice(0, limit);
+}
+
+function inspectionEventText(event = {}) {
+  return [
+    event.phase,
+    event.status,
+    event.title,
+    event.detail,
+    event.tool,
+    event.source,
+    ...(event.refs || []),
+    ...(event.artifactRefs || []),
+    ...(event.files || []).map((file) => `${file.path || ""} ${file.summary || ""}`)
+  ].join(" ").toLowerCase();
+}
+
+function inspectionActionText(event = {}) {
+  return [event.phase, event.status, event.title, event.detail, event.tool, event.source].join(" ").toLowerCase();
+}
+
+function isDoneInspectionEvent(event = {}) {
+  const status = String(event.status || "").toLowerCase();
+  if (!["done", "ok", "pass", "passed", "complete", "completed"].includes(status)) return false;
+  if (/^file (added|modified|deleted)$/i.test(String(event.title || ""))) return false;
+  const phase = String(event.phase || "").toLowerCase();
+  const actionText = inspectionActionText(event);
+  return ["observe", "evidence", "audit", "handoff"].includes(phase) || /\b(read|inspect|review|grep|search|cat|sed|rg|jq|audit|verify|test|smoke|playwright|vitest|jest|pytest|npm test)\b/.test(actionText);
+}
+
+function isDoneTestEvent(event = {}) {
+  return isDoneInspectionEvent(event) && /\b(test|tests|smoke|playwright|vitest|jest|pytest|npm test|pnpm test|yarn test)\b/.test(inspectionActionText(event));
+}
+
+function eventMentionsRef(event = {}, ref = "") {
+  const cleanRef = String(ref || "").toLowerCase();
+  if (!cleanRef) return false;
+  const basename = cleanRef.split("/").pop();
+  const directRefs = [
+    ...(event.refs || []),
+    ...(event.artifactRefs || []),
+    ...(event.files || []).map((file) => file.path)
+  ].map((item) => String(item || "").toLowerCase());
+  if (directRefs.some((item) => item === cleanRef || item.endsWith(`/${cleanRef}`))) return true;
+  const text = inspectionEventText(event);
+  return text.includes(cleanRef) || (basename && basename.length > 5 && text.includes(basename));
+}
+
+function buildInspectionCoverage({ codeGraph = {}, processTrace = {} }) {
+  const events = [processTrace.previous, processTrace.current, processTrace.next, ...(processTrace.events || [])].filter(Boolean);
+  const inspectionEvents = events.filter(isDoneInspectionEvent);
+  const testEvents = events.filter(isDoneTestEvent);
+  const rows = (codeGraph.changedImpact || [])
+    .filter((item) => item?.path && ((item.dependents || []).length || (item.tests || []).length))
+    .slice(0, 12)
+    .map((item) => {
+      const refs = uniqueRefs([...(item.dependents || []), ...(item.tests || [])], 16);
+      const inspections = refs.map((ref) => {
+        const kind = (item.tests || []).includes(ref) ? "test" : "dependent";
+        const exactEvent = inspectionEvents.find((event) => eventMentionsRef(event, ref));
+        const testEvent = kind === "test" ? testEvents.find((event) => eventMentionsRef(event, ref)) : null;
+        const evidence = exactEvent || testEvent || null;
+        return {
+          ref,
+          kind,
+          status: evidence ? (kind === "test" && testEvent ? "tested" : "inspected") : "missing",
+          evidence: evidence
+            ? {
+                id: evidence.id,
+                phase: evidence.phase,
+                status: evidence.status,
+                title: evidence.title,
+                tool: evidence.tool,
+                refs: uniqueRefs([...(evidence.refs || []), ...(evidence.artifactRefs || []), ...(evidence.files || []).map((file) => file.path)], 6)
+              }
+            : null
+        };
+      });
+      const missing = inspections.filter((entry) => entry.status === "missing");
+      return {
+        path: item.path,
+        risk: item.risk,
+        requiredRefs: refs,
+        missingRefs: missing.map((entry) => entry.ref),
+        inspectedRefs: inspections.filter((entry) => entry.status !== "missing").map((entry) => entry.ref),
+        inspections,
+        status: missing.length ? "warn" : "ok",
+        summary: missing.length
+          ? `${missing.length}/${refs.length} impacted dependent/test ref(s) still need inspection evidence.`
+          : `${refs.length} impacted dependent/test ref(s) have inspection or test evidence.`
+      };
+    });
+  const requiredRefs = uniqueRefs(rows.flatMap((row) => row.requiredRefs), 40);
+  const missingRefs = uniqueRefs(rows.flatMap((row) => row.missingRefs), 40);
+  const inspectedRefs = uniqueRefs(rows.flatMap((row) => row.inspectedRefs), 40);
+  const status = missingRefs.length ? "warn" : "ok";
+  return {
+    schemaVersion: "project-agent.inspection-coverage.v1",
+    status,
+    targetCount: rows.length,
+    requiredCount: requiredRefs.length,
+    inspectedCount: inspectedRefs.length,
+    missingCount: missingRefs.length,
+    requiredRefs,
+    inspectedRefs,
+    missingRefs,
+    rows,
+    evidenceEvents: inspectionEvents.slice(0, 8).map((event) => ({
+      id: event.id,
+      phase: event.phase,
+      status: event.status,
+      title: event.title,
+      tool: event.tool,
+      refs: uniqueRefs([...(event.refs || []), ...(event.artifactRefs || []), ...(event.files || []).map((file) => file.path)], 8)
+    })),
+    summary: requiredRefs.length
+      ? missingRefs.length
+        ? `${missingRefs.length}/${requiredRefs.length} impacted dependent/test ref(s) lack inspection evidence.`
+        : `${requiredRefs.length} impacted dependent/test ref(s) have inspection evidence.`
+      : "No dependent or owned-test inspection coverage is required yet.",
+    nextAction: missingRefs.length
+      ? `Inspect or test ${missingRefs.slice(0, 4).join(", ")} before accepting handoff.`
+      : "Keep inspection/test evidence linked when code graph impact changes.",
+    refs: uniqueRefs([".project-agent/process-trace.json", ".project-agent/architecture-map.json", ...missingRefs, ...inspectedRefs], 16)
+  };
+}
+
 function riskCheck(id, label, status, detail, refs = [], action = "") {
   return {
     id,
@@ -3445,7 +3618,7 @@ function riskCheck(id, label, status, detail, refs = [], action = "") {
   };
 }
 
-function buildPreEditRisk({ changedFiles = [], architectureTrace = {}, developmentTrail = {}, interruptedWork = {}, takeoverReadiness = {}, openTargets = [] }) {
+function buildPreEditRisk({ changedFiles = [], architectureTrace = {}, developmentTrail = {}, processTrace = {}, interruptedWork = {}, takeoverReadiness = {}, openTargets = [] }) {
   const topFolders = architectureTrace.topFolders || [];
   const codeGraph = architectureTrace.codeGraph || {};
   const highRiskSteps = (developmentTrail.steps || []).filter((step) => step.risk === "high");
@@ -3453,8 +3626,10 @@ function buildPreEditRisk({ changedFiles = [], architectureTrace = {}, developme
   const editSurface = changedFiles.filter((file) => file.kind !== "state").slice(0, 10);
   const changedTestFiles = editSurface.filter((file) => file.kind === "test" || isTestLikePath(file.path));
   const changedCodeFiles = editSurface.filter((file) => ["code", "config", "kernel"].includes(file.kind) || /\.(js|jsx|ts|tsx|py|go|rs|java|rb|php)$/i.test(file.path));
-  const dependencyImpact = (codeGraph.changedImpact || []).filter((item) => item.dependents?.length || item.dependencies?.length || item.packageImports?.length);
+  const dependencyImpact = (codeGraph.changedImpact || []).filter((item) => item.dependents?.length || item.dependencies?.length || item.packageImports?.length || item.tests?.length);
   const inboundDependencyImpact = dependencyImpact.filter((item) => item.dependents?.length);
+  const ownedTestRefs = [...new Set((codeGraph.changedImpact || []).flatMap((item) => item.tests || []))].slice(0, 12);
+  const inspectionCoverage = buildInspectionCoverage({ codeGraph, processTrace });
   const testGap = Boolean(changedCodeFiles.length && !changedTestFiles.length);
   const folderGroups = new Map();
   for (const file of editSurface) {
@@ -3518,20 +3693,38 @@ function buildPreEditRisk({ changedFiles = [], architectureTrace = {}, developme
       inboundDependencyImpact.length
         ? `${inboundDependencyImpact.length} changed code file(s) have local dependents.`
         : dependencyImpact.length
-          ? `${dependencyImpact.length} changed code file(s) have outbound dependency links.`
+          ? `${dependencyImpact.length} changed code file(s) have dependency or test ownership links.`
           : codeGraph.nodeCount
             ? "No changed file has an inbound local dependency edge."
             : "No code dependency graph is available for the changed code surface.",
-      dependencyImpact.flatMap((item) => [item.path, ...(item.dependents || []), ...(item.dependencies || [])]),
+      dependencyImpact.flatMap((item) => [item.path, ...(item.dependents || []), ...(item.dependencies || []), ...(item.tests || []), ...(item.recommendedReads || [])]),
       inboundDependencyImpact[0]?.nextAction || dependencyImpact[0]?.nextAction || (changedCodeFiles[0]?.path ? `Inspect dependency graph before editing ${changedCodeFiles[0].path}.` : "Continue.")
+    ),
+    riskCheck(
+      "inspection_coverage",
+      "Inspection Coverage",
+      inspectionCoverage.status === "warn" ? "warn" : "ok",
+      inspectionCoverage.summary,
+      inspectionCoverage.missingRefs.length ? inspectionCoverage.missingRefs : inspectionCoverage.requiredRefs,
+      inspectionCoverage.nextAction
     ),
     riskCheck(
       "test_gap",
       "Test Gap",
       testGap ? "warn" : "ok",
-      testGap ? `${changedCodeFiles.length} code/config file(s) changed without a changed test file.` : changedTestFiles.length ? `${changedTestFiles.length} changed test file(s) cover the edit surface.` : "No code edit surface needs a test pairing yet.",
-      [...changedCodeFiles, ...changedTestFiles].map((file) => file.path),
-      testGap ? "Run the relevant test command or add evidence before claiming completion." : "Keep test evidence linked to acceptance criteria."
+      testGap
+        ? ownedTestRefs.length
+          ? `${changedCodeFiles.length} code/config file(s) changed; ${ownedTestRefs.length} likely test owner(s) should be inspected or run.`
+          : `${changedCodeFiles.length} code/config file(s) changed without a changed test file.`
+        : changedTestFiles.length
+          ? `${changedTestFiles.length} changed test file(s) cover the edit surface.`
+          : "No code edit surface needs a test pairing yet.",
+      [...changedCodeFiles.map((file) => file.path), ...changedTestFiles.map((file) => file.path), ...ownedTestRefs],
+      testGap
+        ? ownedTestRefs[0]
+          ? `Inspect or run ${ownedTestRefs.slice(0, 3).join(", ")} before claiming completion.`
+          : "Run the relevant test command or add evidence before claiming completion."
+        : "Keep test evidence linked to acceptance criteria."
     ),
     riskCheck(
       "acceptance_gaps",
@@ -3566,6 +3759,7 @@ function buildPreEditRisk({ changedFiles = [], architectureTrace = {}, developme
     changedFiles: editSurface,
     impactedFolders: topFolders.slice(0, 6),
     coChangePartners,
+    inspectionCoverage,
     testGap: {
       status: testGap ? "warn" : "ok",
       changedCodeFiles: changedCodeFiles.map((file) => file.path).slice(0, 8),
@@ -4403,7 +4597,7 @@ function buildContinuity({ projectDir = "", summary, packet, currentStep, proces
   const architectureTrace = buildArchitectureTrace(architecture, changedFiles);
   const processTrace = buildProcessTrace(process);
   const developmentTrail = buildDevelopmentTrail({ processTrace, architectureTrace, changedFiles });
-  const preEditRisk = buildPreEditRisk({ changedFiles, architectureTrace, developmentTrail, interruptedWork, takeoverReadiness, openTargets });
+  const preEditRisk = buildPreEditRisk({ changedFiles, architectureTrace, developmentTrail, processTrace, interruptedWork, takeoverReadiness, openTargets });
   const handoffLifecycle = buildHandoffLifecycle({ goal, handoff, handoffSnapshot, takeoverReadiness, interruptedWork, agentLeases, preEditRisk });
   const freshnessGate = buildFreshnessGate({ projectDir: projectDir || architecture?.projectDir || "", processTrace, architectureTrace, handoffLifecycle, handoffSnapshot, preEditRisk, agentLeases, interruptedWork });
   const phaseLedger = buildPhaseLedger(processTrace);

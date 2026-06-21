@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n server,vite -c cyan,green \"node server/index.js\" \"vite --host 127.0.0.1\"",
+    "dev": "concurrently -k -n server,vite -c cyan,green \"node server/index.js\" \"vite\"",
     "server": "node server/index.js",
     "start": "node server/index.js",
     "event": "node server/event-cli.js",
@@ -15,6 +15,7 @@
     "manifest": "node server/state-manifest-cli.js",
     "context": "node server/agent-context-cli.js",
     "grep-context": "node server/grep-context-cli.js",
+    "mcp": "node server/project-mcp.js",
     "cli-agent": "node server/cli-agent-cli.js",
     "codex-smoke": "node server/codex-takeover-smoke-cli.js",
     "context-prompt": "node server/agent-context-prompt-cli.js",
@@ -24,10 +25,11 @@
     "resume": "node server/resume-cli.js",
     "next-agent": "node server/next-agent-prompt-cli.js",
     "build": "vite build",
-    "preview": "vite preview --host 127.0.0.1",
+    "preview": "vite preview",
     "test": "node server/smoke-test.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@vitejs/plugin-react": "^5.1.1",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
@@ -38,7 +40,7 @@
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "vite": "^7.2.7",
-    "ws": "^8.18.3"
-  },
-  "devDependencies": {}
+    "ws": "^8.18.3",
+    "zod": "^4.4.3"
+  }
 }

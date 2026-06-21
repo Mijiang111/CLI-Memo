@@ -4,6 +4,69 @@ A local terminal wrapper for the Project Agent MVP. It gives you a real command 
 
 The app is designed for trusted local use. It runs commands in the selected project directory and binds to `127.0.0.1` by default.
 
+## Local Health
+
+The app exposes a local health snapshot:
+
+```bash
+curl http://127.0.0.1:4147/api/health
+```
+
+The response reports the API port, project directory, initialized state, terminal backend, manifest verification, memory/index freshness, and the explicit security boundary. Remote access is disabled by the default `127.0.0.1` bind host; auth is only enabled when non-local deployment is explicitly requested with a token. The header health strip uses this endpoint to show online/watch/offline and reconnect status.
+
+## Sandbox And Permissions
+
+The app exposes a machine-readable permission posture for the local harness:
+
+```bash
+curl http://127.0.0.1:4147/api/security/sandbox
+```
+
+The response reports local-only posture, read/write/execution/network scopes, automatic memory/context harness calls, confirmation-gated actions, blocked-by-default rules, package-script risk, and sensitive-looking env names without exposing values. The same snapshot appears in Project map -> Product -> Sandbox & Permissions.
+
+## Optional Non-local Auth
+
+Remote/shared access is disabled by default. A non-local bind only becomes effective when all three settings are present:
+
+```bash
+PROJECT_AGENT_BIND_HOST=0.0.0.0 \
+PROJECT_AGENT_REMOTE=1 \
+PROJECT_AGENT_AUTH_TOKEN="<at-least-16-characters>" \
+npm run dev
+```
+
+Without the explicit remote flag and token, the server stays on `127.0.0.1`. `GET /api/security/auth` reports auth readiness without exposing the raw token. In remote mode, `/api` routes and `/terminal`/`/events` WebSockets require a bearer token; the UI can store the token locally through the Auth Unlock prompt.
+
+## Local State Transfer
+
+The app can export and restore `.project-agent` state through governed local APIs:
+
+```bash
+curl http://127.0.0.1:4147/api/state/export?mode=portable
+```
+
+`POST /api/state/import` defaults to dry-run and returns a create/replace/identical/reject plan. Executed imports require explicit overwrite, use hash validation, and refresh the state manifest after writing. The same flow is available in Project map -> Product -> State Transfer.
+
+## Multi-project Launcher
+
+The Product view also exposes a local project launcher:
+
+```bash
+curl http://127.0.0.1:4147/api/projects
+```
+
+It lists current, default, app-root, and registered projects with initialized state, active goal, memory counts, manifest health, running process state, and persisted log refs. `POST /api/projects/launch` returns a dry-run launch plan by default, including available API/UI ports and a runnable command with `PROJECT_DIR`, `PORT`, `VITE_API_PORT`, and `VITE_PORT`.
+
+Launcher lifecycle controls are also API-first so agents and the UI can act without manual PID hunting:
+
+```bash
+curl "http://127.0.0.1:4147/api/projects/logs?projectDir=$PWD&limit=24"
+curl -X POST http://127.0.0.1:4147/api/projects/stop -H "Content-Type: application/json" -d '{"projectDir":"'$PWD'","execute":true,"dryRun":false}'
+curl -X POST http://127.0.0.1:4147/api/projects/restart -H "Content-Type: application/json" -d '{"projectDir":"'$PWD'","execute":true,"dryRun":false}'
+```
+
+Process logs are persisted under `.project-agent/launcher-logs/*.jsonl` with a bounded history.
+
 ## What It Does
 
 - Opens a terminal rooted at `PROJECT_DIR`.
@@ -29,10 +92,17 @@ The app is designed for trusted local use. It runs commands in the selected proj
 - Writes `.project-agent/process-trace.json` with the previous/current/next AI process cursor.
 - Writes `.project-agent/development-trail.json` with process steps linked to touched files, impacted folders, takeover risk, and inspect order.
 - Writes `.project-agent/architecture-map.json` with the durable project tree, file changes, and inspect order.
+- Embeds code graph changed-impact hints with dependents, dependencies, likely tests, symbol callers, co-changed files, and read-before-edit recommendations.
+- Warns during pre-edit and handoff audit when impacted dependents or likely tests have no completed read/test evidence.
 - Writes `.project-agent/state-manifest.json` with hashes for the handoff files.
 - Embeds a State Boundary Audit that separates raw events, durable sources, derived indexes, and disclosure outputs.
 - Tracks git freshness inside the freshness gate, including HEAD, branch, dirty files, untracked files, and state-file changes.
 - Embeds a Temporal Provenance Audit that tracks fact source refs, source hashes, observed times, validity windows, stale sources, and contradictions.
+- Exposes `/api/health` for local server, project, terminal, manifest, memory/index, reconnect, and security-boundary readiness.
+- Exposes `/api/security/auth` for safe bind/auth readiness and optional bearer-token remote mode.
+- Exposes `/api/security/sandbox` for local-only sandbox posture, permission scopes, automatic harness policy, confirmation gates, and blocked-by-default rules.
+- Exposes `/api/state/export` and `/api/state/import` for dry-run-first `.project-agent` backup, migration, and restore.
+- Exposes `/api/projects` and `/api/projects/launch` for local-only project discovery and launch planning without editing environment variables by hand.
 - Writes `.project-agent/takeover-packet.json` as a concise next-agent startup index.
 - Writes `.project-agent/continuity-audit.json` as a machine-readable takeover proof checklist.
 - Writes `.project-agent/takeover-acceptance-audit.json` as a user-objective acceptance audit for visible memory, dynamic process, managed architecture, and crash-proof handoff.
@@ -119,6 +189,45 @@ npm run event -- \
 
 Recommended phases are `observe`, `plan`, `execute`, `evidence`, `audit`, and `handoff`. Recommended statuses are `pending`, `current`, `done`, `failed`, and `blocked`.
 
+## MCP Project Tools
+
+CLI Memo can also run as a local MCP server, so coding agents can call the project memory and handoff layer directly instead of only reading fixed files:
+
+```bash
+npm run mcp -- --project-dir /path/to/project
+```
+
+The MCP server exposes the first project-native tool set:
+
+- `project_start`: initialize or repair `.project-agent` state, optionally creating the first active goal.
+- `project_takeover_summary`: read the small summary-first takeover packet.
+- `project_context_search`: run grep-first retrieval with optional file/folder/fileType filters and return snippets with exact refs.
+- `project_read_ref`: read a project-relative file ref, line range, or JSON selector.
+- `project_record_event`: record the agent's current process event into runtime state.
+- `project_architecture_changes`: inspect recent changes, impact, inspect order, code graph summary, symbol callers, likely test owners, and read-before-edit recommendations.
+- `project_code_search`: query the local `symbol-graph-lite` import/export/call graph for files, symbols, dependents, tests, and refs.
+- `project_handoff_audit`: verify takeover readiness, freshness, manifest status, inspection coverage, blockers, and warnings.
+- `project_agent_doctor`: run a Codex/Claude/generic readiness doctor across bootstrap, memory harness, indexes, privacy, access audit, and code search.
+- `project_memory_search`: search canonical memory with deterministic type/file/folder/sourceRef/concept/goalId/fileType/sourceQuality filters, exact refs, source-quality flags, and score breakdowns.
+- `project_memory_seed_dogfood`: idempotently seed benchmark-backed product dogfood memories when `docs/research/memory-gap-deep-benchmark.md` exists.
+- `project_memory_update`: update one canonical memory with a required reason, provenance-preserving version increment, audit row, and cache cascade refresh.
+- `project_memory_supersede`: create a new canonical memory version, mark the old record non-latest with `supersededBy`, and keep both records inspectable by exact refs.
+- `project_memory_retention_audit`: inspect retention policy candidates without mutation.
+- `project_memory_retention_sweep`: dry-run or execute retention expiry, marking eligible records non-latest and refreshing memory indexes.
+- `project_memory_rebuild_index`: rebuild the optional `.project-agent/indexes/memory-bm25.json` cache; direct search uses it when `useIndex: "bm25"` is explicitly requested and the cache is fresh.
+- `project_memory_rebuild_entity_index`: rebuild the optional `.project-agent/indexes/memory-entities.json` entity graph cache over canonical memory concepts, refs, files, folders, and terms.
+- `project_memory_rebuild_vector_index`: rebuild the optional `.project-agent/indexes/memory-vectors.json` local lexical-vector cache. It uses deterministic hashed sparse vectors with `embeddingProvider: "none"` and only affects search when `useIndex: "vector"` or `useIndex: "hybrid"` is requested or auto-selected by the harness.
+- `project_memory_rebuild_all_indexes`: rebuild `index.md`, BM25, entity, and lexical-vector caches together from canonical JSONL memory.
+- `project_memory_privacy_audit`: scan canonical memory and bounded `.project-agent` state for secret-like text, weak provenance, raw architecture policy risks, and writer audit gaps.
+- `project_memory_generated_cleanup`: dry-run or remove rebuildable generated/index files. Active handoff files are protected by default unless explicitly targeted.
+- `project_memory_consolidate_v2`: return governed add/update/supersede/expire proposals before any mutation.
+- `project_memory_access_audit`: query bounded memory search/read access rows recorded by the automatic harness or explicit `auditAccess` calls.
+- `project_memory_harness`: automatically derive memory search/read calls from the active goal, current cursor, recent runtime events, risks, and changed files. It auto-uses fresh BM25/entity/vector caches as a hybrid search path, checks dogfood/retention lifecycle state, returns governed next calls, and is returned by `project_takeover_summary` so agents do not wait for a human to pick memory refs manually.
+
+HTTP mirrors the lifecycle and quality tools with `POST /api/memory/seed-dogfood`, `POST /api/memory/update`, `POST /api/memory/supersede`, `GET /api/memory/retention`, `POST /api/memory/retention/sweep`, `POST /api/memory/indexes/rebuild-all`, `GET /api/memory/privacy`, `GET /api/memory/access-audit`, `GET/POST /api/memory/consolidate-v2`, `GET/POST /api/memory/generated-cleanup`, `GET /api/code/search`, and `GET /api/agent/doctor`.
+
+Pre-start projects are treated as `not_started`, not as failed handoffs. In that state, `project_takeover_summary` points the agent to `project_start` and avoids returning refs that do not exist yet.
+
 ## Universal Command Wrapper
 
 When possible, run external agent commands through `agent-run`. It wraps any command, records a `current` event before execution, records `done` or `failed` afterward, scans changed files, publishes the agent heartbeat, and refreshes `.project-agent/takeover-summary.json`, `.project-agent/agent-context-bundle.json`, `.project-agent/context-starter-prompt.md`, `.project-agent/governance-spec.json`, `.project-agent/continuity-contract.json`, `.project-agent/agent-runbook.json`, `.project-agent/memory-graph.json`, `.project-agent/process-trace.json`, `.project-agent/development-trail.json`, `.project-agent/architecture-map.json`, `.project-agent/state-manifest.json`, `.project-agent/takeover-packet.json`, `.project-agent/continuity-audit.json`, `.project-agent/takeover-acceptance-audit.json`, `.project-agent/next-agent-prompt.md`, `.project-agent/continuity.json`, `.project-agent/continuity-detail.json`, `.project-agent/resume.md`, and `.project-agent/recovery.md`.
@@ -152,6 +261,7 @@ To use grep-first retrieval as the default local context database:
 
 ```bash
 npm run grep-context -- --project-dir /path/to/project --query "current task or active goal" --limit 8
+npm run grep-context -- --project-dir /path/to/project --query "memory filter" --folder docs --file-type md
 npm run grep-context -- --project-dir /path/to/project --read ".project-agent/process-trace.json:1-40" --max-bytes 6000
 ```
 
@@ -161,6 +271,14 @@ To generate or launch a Codex CLI agent with the summary-first and grep-first pr
 npm run cli-agent -- --project-dir /path/to/project
 npm run cli-agent -- --project-dir /path/to/project --launch
 ```
+
+To let an AI harness discover the provider config and first memory calls without manual JSON editing:
+
+```bash
+curl http://127.0.0.1:4147/api/agent/bootstrap
+```
+
+The response uses `project-agent.agent-bootstrap.v1` and includes Codex, Claude Code, Gemini, Kimi, and generic MCP snippets, `project_takeover_summary` as the first tool, `project_memory_harness` as the automatic memory routing step, the ordered context/read/event protocol, and the local-only project scope. The same state appears in Project map -> Product -> Agent Bootstrap.
 
 To prove that the summary and budgeted bundle contain enough memory, process, architecture, governance, and validation state for a cold-start replacement agent:
 
